@@ -1,14 +1,16 @@
 import type { CSSProperties } from "react";
 
-import type { HealthState } from "@/lib/tree-fixtures";
+import { Tree } from "@/components/tree/tree";
 import { formatSignedPct } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
-interface TreePlaceholderProps {
+interface TreeStageProps {
+  ticker: string;
   stage: number;
   stageLabel: string;
-  health: HealthState;
   healthLabel: string;
+  /** Tree healthScore in [-1, 1]. */
+  healthUnit: number;
   peakReturnPct: number;
   totalReturnPct: number;
   return30dPct: number;
@@ -17,27 +19,25 @@ interface TreePlaceholderProps {
 const TOTAL_STAGES = 5;
 
 /**
- * Stand-in for the procedural SVG tree (SPEC §7), which is not built yet.
- * A plain foliage-green disc on a ground plane, sized to read as the primary
- * object on the page. Every state it represents is also written out in text.
+ * The framed "stage" the tree stands on: sky, ground plane, ambient light,
+ * plus the structure/health readouts that convey the same state in text
+ * (SPEC §10 accessibility). The tree itself is the procedural <Tree>.
  */
-export function TreePlaceholder({
+export function TreeStage({
+  ticker,
   stage,
   stageLabel,
-  health,
   healthLabel,
+  healthUnit,
   peakReturnPct,
   totalReturnPct,
   return30dPct,
-}: TreePlaceholderProps) {
-  const showNewGrowth = health === "thriving" || health === "healthy";
-
+}: TreeStageProps) {
   const label =
     `${stageLabel}, structure stage ${stage} of ${TOTAL_STAGES}. ` +
     `Health: ${healthLabel}. Total return since planting ${formatSignedPct(totalReturnPct)}, ` +
     `with a peak of ${formatSignedPct(peakReturnPct)}. ` +
-    `Recent 30-day trend ${formatSignedPct(return30dPct)}. ` +
-    `Shown as a placeholder disc until the procedural tree renderer is built.`;
+    `Recent 30-day trend ${formatSignedPct(return30dPct)}.`;
 
   return (
     <div className="flex flex-col gap-5">
@@ -65,7 +65,7 @@ export function TreePlaceholder({
         {/* ground plane */}
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-x-0 bottom-0 h-[36%]"
+          className="pointer-events-none absolute inset-x-0 bottom-0 h-[34%]"
           style={{
             background:
               "linear-gradient(180deg, transparent 0%, color-mix(in oklch, var(--ground), transparent 30%) 45%, var(--ground) 100%)",
@@ -73,67 +73,40 @@ export function TreePlaceholder({
         />
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-x-0 bottom-[36%] h-px bg-foreground/10"
+          className="pointer-events-none absolute inset-x-0 bottom-[34%] h-px bg-foreground/10"
         />
 
-        {/* the tree */}
-        <div className="absolute inset-x-0 bottom-[calc(36%-1.75rem)] flex flex-col items-center">
-          <div className="relative">
-            {/* soft canopy glow */}
+        {/* the tree, rooted on the ground line */}
+        <div className="absolute inset-x-0 bottom-[calc(34%-0.5rem)] flex justify-center">
+          <div
+            className="relative"
+            style={{
+              width: "clamp(240px, 46vw, 380px)",
+              height: "clamp(240px, 42vh, 380px)",
+            }}
+          >
+            {/* soft canopy light */}
             <div
               aria-hidden
-              className="grove-glow absolute left-1/2 top-1/2 -z-10 -translate-x-1/2 -translate-y-1/2 rounded-full blur-2xl"
+              className="grove-glow absolute left-1/2 top-[38%] -z-10 h-[62%] w-[78%] -translate-x-1/2 -translate-y-1/2 rounded-full blur-2xl"
               style={{
-                width: "clamp(200px, 34vw, 300px)",
-                height: "clamp(200px, 34vw, 300px)",
                 background:
-                  "radial-gradient(circle, color-mix(in oklch, var(--foliage), transparent 45%) 0%, transparent 70%)",
+                  "radial-gradient(circle, color-mix(in oklch, var(--foliage), transparent 55%) 0%, transparent 70%)",
               }}
             />
 
-            <div className="grove-breathe">
-              {/* new-growth tips (only when the tree is doing well) */}
-              {showNewGrowth && (
-                <>
-                  {[
-                    { top: "6%", left: "28%" },
-                    { top: "-1%", left: "54%" },
-                    { top: "13%", left: "78%" },
-                  ].map((pos, i) => (
-                    <span
-                      key={i}
-                      aria-hidden
-                      className="grove-glow absolute z-10 h-2.5 w-2.5 rounded-full"
-                      style={{
-                        ...pos,
-                        background: "var(--foliage-tip)",
-                        boxShadow:
-                          "0 0 8px color-mix(in oklch, var(--foliage-tip), transparent 40%)",
-                        animationDelay: `${i * 0.9}s`,
-                      }}
-                    />
-                  ))}
-                </>
-              )}
+            <Tree
+              decorative
+              ticker={ticker}
+              structureStage={stage}
+              healthScore={healthUnit}
+              className="grove-breathe h-full w-full origin-bottom"
+            />
 
-              {/* canopy disc — placeholder for the tree */}
-              <div
-                className="rounded-full"
-                style={{
-                  width: "clamp(168px, 30vw, 264px)",
-                  height: "clamp(168px, 30vw, 264px)",
-                  background:
-                    "radial-gradient(circle at 36% 30%, var(--foliage-tip) 0%, var(--foliage) 46%, var(--foliage-deep) 100%)",
-                  boxShadow:
-                    "inset 0 2px 10px rgba(255,255,255,0.35), inset 0 -22px 44px color-mix(in oklch, var(--foliage-deep), transparent 25%), 0 26px 50px -18px color-mix(in oklch, var(--foliage-deep), transparent 20%)",
-                }}
-              />
-            </div>
-
-            {/* contact shadow on the ground */}
+            {/* contact shadow */}
             <div
               aria-hidden
-              className="absolute left-1/2 top-full h-4 w-[78%] -translate-x-1/2 rounded-[100%] bg-foreground/25 blur-md"
+              className="absolute bottom-0 left-1/2 h-3.5 w-[66%] -translate-x-1/2 translate-y-1/2 rounded-[100%] bg-foreground/25 blur-md"
             />
           </div>
         </div>
@@ -189,9 +162,7 @@ export function TreePlaceholder({
             <span className="text-xs text-muted-foreground">last 30 days</span>
           </div>
           <div className="flex items-center gap-2">
-            <span
-              className="inline-flex items-center gap-1.5 rounded-full bg-secondary px-2.5 py-1 text-xs font-medium text-secondary-foreground"
-            >
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-secondary px-2.5 py-1 text-xs font-medium text-secondary-foreground">
               <span
                 aria-hidden
                 className="h-2 w-2 rounded-full"

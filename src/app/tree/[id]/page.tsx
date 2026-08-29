@@ -3,8 +3,9 @@ import { ArrowLeft, Moon, Sun } from "lucide-react";
 
 import { JournalFeed } from "@/components/tree/journal-feed";
 import { PositionPanel } from "@/components/tree/position-panel";
-import { TreePlaceholder } from "@/components/tree/tree-placeholder";
+import { TreeStage } from "@/components/tree/tree-stage";
 import { getTreeFixture } from "@/lib/tree-fixtures";
+import { healthPercentToUnit } from "@/lib/tree";
 
 export default async function TreePage({ params }: PageProps<"/tree/[id]">) {
   const { id } = await params;
@@ -59,11 +60,12 @@ export default async function TreePage({ params }: PageProps<"/tree/[id]">) {
             aria-label="Tree"
             className="min-[900px]:sticky min-[900px]:top-[81px] min-[900px]:self-start"
           >
-            <TreePlaceholder
+            <TreeStage
+              ticker={tree.ticker}
               stage={tree.structureStage}
               stageLabel={tree.structureStageLabel}
-              health={tree.health}
               healthLabel={tree.healthLabel}
+              healthUnit={healthPercentToUnit(tree.healthScore)}
               peakReturnPct={tree.peakReturnPct}
               totalReturnPct={totalReturnPct}
               return30dPct={tree.return30dPct}
