@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { Tree3D } from "@/components/tree/tree-3d";
 import { healthLabelForUnit } from "@/lib/tree3d";
+import { SKIN_LIST, type SkinId } from "@/lib/tree-skins";
 import { cn } from "@/lib/utils";
 
 const STAGE_LABELS = [
@@ -67,6 +68,8 @@ export default function DevTreePage() {
   const [structureStage, setStructureStage] = useState(3);
   const [healthScore, setHealthScore] = useState(0.3);
   const [volatility, setVolatility] = useState(0.35);
+  const [skin, setSkin] = useState<SkinId>("default");
+  const [shedding, setShedding] = useState(false);
 
   const cleanTicker = ticker.trim() || "NVDA";
 
@@ -151,12 +154,51 @@ export default function DevTreePage() {
             onChange={setVolatility}
           />
 
+          <div className="space-y-2">
+            <span className="text-[0.7rem] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+              Leaf skin
+            </span>
+            <div className="flex flex-wrap gap-1.5">
+              {SKIN_LIST.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => setSkin(s.id)}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors",
+                    s.id === skin
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )}
+                >
+                  <span
+                    aria-hidden
+                    className="size-3 rounded-full border border-black/10"
+                    style={{ background: s.ramp.thriving }}
+                  />
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={shedding}
+              onChange={(e) => setShedding(e.target.checked)}
+              style={{ accentColor: "var(--primary)" }}
+            />
+            Down day — falling-leaf particles
+          </label>
+
           <p className="text-xs leading-relaxed text-muted-foreground">
             <span className="font-medium text-foreground/80">
-              healthScore never regenerates the mesh.
+              healthScore and skin never regenerate the mesh.
             </span>{" "}
-            It sets the leaf material colour and trims the canopy via drawRange.
-            structureStage and volatility (bucketed) call generate().
+            Skin swaps the leaf texture + colour ramp + density on the live
+            material; only structureStage, volatility (bucketed), and the skin&rsquo;s
+            leaf <em>size</em> call generate().
           </p>
         </div>
 
@@ -167,6 +209,8 @@ export default function DevTreePage() {
             structureStage={structureStage}
             healthScore={healthScore}
             volatility={volatility}
+            skin={skin}
+            shedding={shedding}
             interactive
           />
         </div>

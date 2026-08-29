@@ -1,5 +1,9 @@
 "use client";
 
+/* eslint-disable react-hooks/immutability -- R3F is imperative: three.js
+   objects (materials, geometry buffers, the ez-tree instance) are mutated in
+   effects and the frame loop by design. */
+
 import { Component, type ReactNode, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
@@ -11,19 +15,46 @@ import parkHdri from "@pmndrs/assets/hdri/park.exr";
 import {
   applyGeometryOptions,
   hashToSeed,
-  healthToLeafColor,
   healthToLeafDensity,
   mulberry32,
   volatilityBucket,
   volatilityToWind,
 } from "@/lib/tree3d";
+import {
+  getSkin,
+  type LeafSkin,
+  type SkinId,
+  skinLeafColor,
+} from "@/lib/tree-skins";
 
 export interface Tree3DSceneProps {
   ticker: string;
   structureStage: number;
   healthScore: number;
   volatility: number;
+  /** which leaf skin this planting uses */
+  skin: SkinId;
+  /** true on a down day — spawns falling-leaf particles in the skin's texture */
+  shedding?: boolean;
   interactive?: boolean;
+}
+
+/* ------------------------------------------------------------------ */
+/* leaf-skin textures — loaded once, shared, cheap to swap            */
+/* ------------------------------------------------------------------ */
+
+const textureLoader = new THREE.TextureLoader();
+const skinTextureCache = new Map<string, THREE.Texture>();
+
+function skinTexture(url: string): THREE.Texture {
+  let tex = skinTextureCache.get(url);
+  if (!tex) {
+    tex = textureLoader.load(url);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 8;
+    skinTextureCache.set(url, tex);
+  }
+  return tex;
 }
 
 /* ------------------------------------------------------------------ */
@@ -125,16 +156,30 @@ function shuffleLeafIndices(tree: Tree, seed: number): number {
   return blocks * LEAF_INDEX_BLOCK;
 }
 
-/** healthScore → leaf material colour + canopy density. No regeneration. */
-function applyHealthMaterial(tree: Tree, maxLeafIndex: number, health: number) {
+/**
+ * Skin + healthScore → leaf texture, colour, and canopy density. All of it is
+ * MATERIAL / drawRange work — no Tree.generate(). (Only the skin's leaf *size*
+ * is geometry; that lives in the geometry effect.)
+ */
+function applyLeafMaterial(
+  tree: Tree,
+  maxLeafIndex: number,
+  health: number,
+  skin: LeafSkin,
+) {
   const mat = tree.leavesMesh.material as THREE.MeshPhongMaterial;
   if (!mat) return;
-  mat.color.set(healthToLeafColor(health));
-  mat.opacity = health < -0.45 ? 0.9 : 1;
-  mat.transparent = mat.opacity < 1;
-  mat.needsUpdate = true;
 
-  const frac = healthToLeafDensity(health);
+  const tex = skinTexture(skin.texture);
+  if (mat.map !== tex) {
+    mat.map = tex;
+    mat.needsUpdate = true;
+  }
+  mat.color.set(skinLeafColor(skin, health));
+  mat.opacity = health < -0.45 ? 0.92 : 1;
+  mat.transparent = mat.opacity < 1;
+
+  const frac = Math.min(1, healthToLeafDensity(health) * skin.densityMul);
   const n =
     Math.floor((maxLeafIndex * frac) / LEAF_INDEX_BLOCK) * LEAF_INDEX_BLOCK;
   tree.leavesMesh.geometry.setDrawRange(0, Math.max(0, n));
@@ -150,14 +195,16 @@ function EzTreeObject({
   structureStage,
   healthScore,
   volatility,
+  skin: skinId,
   onBounds,
-}: Omit<Tree3DSceneProps, "interactive"> & {
+}: Omit<Tree3DSceneProps, "interactive" | "shedding"> & {
   onBounds: (b: TreeBounds) => void;
 }) {
   // One imperative THREE.Group for the life of the component. useState's lazy
   // initialiser gives a stable instance; React never reconciles its internals.
   const [tree] = useState(() => new Tree());
   const maxLeafIndexRef = useRef(0);
+  const skin = getSkin(skinId);
 
   const seed = hashToSeed(ticker);
   const volBucket = volatilityBucket(volatility);
@@ -165,12 +212,14 @@ function EzTreeObject({
   // never triggers a rebuild; the raw value only drives wind (below).
   const bucketedVolatility = volBucket / 8;
 
-  // GEOMETRY — the expensive path. seed / structureStage / volatility bucket.
+  // GEOMETRY — the expensive path. seed / stage / volatility bucket / skin leaf
+  // size (the only skin field that is geometry — a skin pick does ONE rebuild).
   useEffect(() => {
     applyGeometryOptions(tree.options, {
       seed,
       structureStage,
       volatility: bucketedVolatility,
+      leafSizeMul: skin.leafSizeMul,
     });
     tree.generate();
     maxLeafIndexRef.current = shuffleLeafIndices(tree, seed);
@@ -189,15 +238,14 @@ function EzTreeObject({
         1,
       ),
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tree, seed, structureStage, bucketedVolatility]);
+  }, [tree, seed, structureStage, bucketedVolatility, skin.leafSizeMul, onBounds]);
 
-  // MATERIAL — healthScore changes daily. Tint + drawRange only, no rebuild.
-  // structureStage / bucket are deps too so the tint re-applies to the fresh
+  // MATERIAL — skin + healthScore. Texture / tint / drawRange only, no rebuild.
+  // structureStage / bucket / skin are deps so it re-applies to the fresh
   // material after any regenerate.
   useEffect(() => {
-    applyHealthMaterial(tree, maxLeafIndexRef.current, healthScore);
-  }, [tree, healthScore, structureStage, bucketedVolatility]);
+    applyLeafMaterial(tree, maxLeafIndexRef.current, healthScore, skin);
+  }, [tree, healthScore, skin, structureStage, bucketedVolatility]);
 
   // dispose on unmount
   useEffect(() => {
@@ -275,6 +323,88 @@ function CameraRig({
 }
 
 /* ------------------------------------------------------------------ */
+/* falling-leaf particles — down days. Uses the current skin's texture. */
+/* ------------------------------------------------------------------ */
+
+function FallingLeaves({
+  skin,
+  healthScore,
+  bounds,
+}: {
+  skin: LeafSkin;
+  healthScore: number;
+  bounds: TreeBounds;
+}) {
+  const COUNT = 30;
+  const spread = Math.max(6, bounds.radius * 1.15);
+  const top = Math.max(6, bounds.height * 0.95);
+
+  const [geometry] = useState(() => {
+    const g = new THREE.BufferGeometry();
+    const pos = new Float32Array(COUNT * 3);
+    g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    return g;
+  });
+  // per-particle fall speed + horizontal drift phase/amp
+  const [drift] = useState(() => {
+    const rand = mulberry32(0x1eaf);
+    return Array.from({ length: COUNT }, () => ({
+      speed: 1.6 + rand() * 2.4,
+      phase: rand() * Math.PI * 2,
+      amp: 0.4 + rand() * 0.9,
+      x: (rand() * 2 - 1) * spread,
+      z: (rand() * 2 - 1) * spread,
+      y: rand() * top,
+    }));
+  });
+
+  const [material] = useState(
+    () =>
+      new THREE.PointsMaterial({
+        size: Math.max(0.9, skin.leafSizeMul * 1.4),
+        transparent: true,
+        alphaTest: 0.35,
+        depthWrite: false,
+        sizeAttenuation: true,
+      }),
+  );
+
+  useEffect(() => {
+    material.map = skinTexture(skin.texture);
+    material.color.set(skinLeafColor(skin, healthScore));
+    material.needsUpdate = true;
+  }, [material, skin, healthScore]);
+
+  useEffect(() => () => {
+    geometry.dispose();
+    material.dispose();
+  }, [geometry, material]);
+
+  useFrame((_, delta) => {
+    const dt = Math.min(delta, 0.05);
+    const pos = geometry.attributes.position.array as Float32Array;
+    const t = performance.now() * 0.001;
+    for (let i = 0; i < COUNT; i++) {
+      const d = drift[i];
+      d.y -= d.speed * dt;
+      if (d.y < 0.2) {
+        d.y = top;
+        d.x = (Math.random() * 2 - 1) * spread;
+        d.z = (Math.random() * 2 - 1) * spread;
+      }
+      pos[i * 3] = d.x + Math.sin(t * 1.3 + d.phase) * d.amp;
+      pos[i * 3 + 1] = d.y;
+      pos[i * 3 + 2] = d.z + Math.cos(t * 1.1 + d.phase) * d.amp;
+    }
+    geometry.attributes.position.needsUpdate = true;
+  });
+
+  return (
+    <points geometry={geometry} material={material} frustumCulled={false} />
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* resilience — a loader/render failure degrades, it doesn't blank      */
 /* ------------------------------------------------------------------ */
 
@@ -303,10 +433,13 @@ function SceneContents({
   structureStage,
   healthScore,
   volatility,
+  skin: skinId,
+  shedding = false,
   interactive = false,
 }: Tree3DSceneProps) {
   const [bounds, setBounds] = useState<TreeBounds>({ height: 28, radius: 12 });
   const { focusY } = frameCamera(bounds);
+  const skin = getSkin(skinId);
 
   return (
     <>
@@ -321,8 +454,8 @@ function SceneContents({
         position={[24, 34, 14]}
         intensity={2.7}
         castShadow
-        shadow-mapSize={[1024, 1024]}
-        shadow-bias={-0.0005}
+        shadow-mapSize={[2048, 2048]}
+        shadow-bias={-0.0004}
         shadow-normalBias={0.04}
         shadow-camera-near={1}
         shadow-camera-far={110}
@@ -348,9 +481,16 @@ function SceneContents({
           structureStage={structureStage}
           healthScore={healthScore}
           volatility={volatility}
+          skin={skinId}
           onBounds={setBounds}
         />
       </SceneErrorBoundary>
+
+      {shedding && (
+        <SceneErrorBoundary>
+          <FallingLeaves skin={skin} healthScore={healthScore} bounds={bounds} />
+        </SceneErrorBoundary>
+      )}
 
       <ContactShadows
         position={[0, 0.015, 0]}
@@ -387,7 +527,7 @@ function SceneContents({
 export default function Tree3DScene(props: Tree3DSceneProps) {
   return (
     <Canvas
-      shadows="soft"
+      shadows={{ type: THREE.PCFShadowMap }}
       dpr={[1, 2]}
       gl={{
         antialias: true,

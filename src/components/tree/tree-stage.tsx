@@ -1,5 +1,10 @@
+"use client";
+
+import { useState } from "react";
+
 import { Tree3D } from "@/components/tree/tree-3d";
 import { formatSignedPct } from "@/lib/format";
+import { SKIN_LIST, type SkinId } from "@/lib/tree-skins";
 import { cn } from "@/lib/utils";
 
 interface TreeStageProps {
@@ -11,6 +16,10 @@ interface TreeStageProps {
   healthUnit: number;
   /** 0–1, elevated 20-day stdev. */
   volatility: number;
+  /** Skin stored on the planting record. */
+  skin: SkinId;
+  /** Down day → falling-leaf particles in the current skin. */
+  shedding: boolean;
   peakReturnPct: number;
   totalReturnPct: number;
   return30dPct: number;
@@ -19,8 +28,9 @@ interface TreeStageProps {
 const TOTAL_STAGES = 5;
 
 /**
- * The framed view of a single tree: the live 3D scene plus the structure /
- * health readouts that convey the same state in text (SPEC §10 accessibility).
+ * The framed view of a single tree: the live 3D scene, a leaf-skin picker, and
+ * the structure / health readouts that convey the same state in text
+ * (SPEC §10 accessibility).
  */
 export function TreeStage({
   ticker,
@@ -29,10 +39,15 @@ export function TreeStage({
   healthLabel,
   healthUnit,
   volatility,
+  skin: initialSkin,
+  shedding,
   peakReturnPct,
   totalReturnPct,
   return30dPct,
 }: TreeStageProps) {
+  // Would PATCH the planting record; no backend yet, so it's local for now.
+  const [skin, setSkin] = useState<SkinId>(initialSkin);
+
   const label =
     `${stageLabel}, structure stage ${stage} of ${TOTAL_STAGES}. ` +
     `Health: ${healthLabel}. Total return since planting ${formatSignedPct(totalReturnPct)}, ` +
@@ -52,7 +67,36 @@ export function TreeStage({
           structureStage={stage}
           healthScore={healthUnit}
           volatility={volatility}
+          skin={skin}
+          shedding={shedding}
         />
+
+        {/* leaf-skin picker */}
+        <div
+          role="group"
+          aria-label="Leaf skin"
+          className="absolute right-3 top-3 flex gap-1 rounded-full bg-black/35 p-1 backdrop-blur-sm"
+        >
+          {SKIN_LIST.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              onClick={() => setSkin(s.id)}
+              aria-pressed={s.id === skin}
+              title={s.label}
+              className={cn(
+                "size-6 rounded-full border transition",
+                s.id === skin
+                  ? "border-white ring-2 ring-white/60"
+                  : "border-white/40 hover:border-white/80",
+              )}
+              style={{ background: s.ramp.thriving }}
+            >
+              <span className="sr-only">{s.label}</span>
+            </button>
+          ))}
+        </div>
+
         <figcaption className="pointer-events-none absolute bottom-3 left-4 right-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-white/90 [text-shadow:0_1px_3px_rgb(0_0_0/0.55)]">
           <span className="font-medium">{stageLabel}</span>
           <span aria-hidden>·</span>

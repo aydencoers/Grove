@@ -8,6 +8,8 @@
  * no price targets, and no buy / sell / hold language.
  */
 
+import type { SkinId } from "@/lib/tree-skins";
+
 export type StructureStage = 0 | 1 | 2 | 3 | 4 | 5;
 
 export type HealthState =
@@ -68,6 +70,9 @@ export interface TreeFixture {
   /** Elevated 20-day stdev, normalised to 0–1. Drives gnarliness + wind. */
   volatility: number;
 
+  /** Leaf skin chosen for this planting (would be a column on `plantings`). */
+  skin: SkinId;
+
   structureStage: StructureStage;
   structureStageLabel: string;
 
@@ -102,6 +107,7 @@ const DEERE: TreeFixture = {
 
   peakReturnPct: 26.1,
   volatility: 0.32,
+  skin: "default",
 
   structureStage: 3,
   structureStageLabel: "Young tree",

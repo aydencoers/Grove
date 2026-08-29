@@ -14,6 +14,7 @@ export default async function TreePage({ params }: PageProps<"/tree/[id]">) {
   const invested = tree.shares * tree.costBasis;
   const marketValue = tree.shares * tree.currentPrice;
   const totalReturnPct = ((marketValue - invested) / invested) * 100;
+  const downToday = tree.currentPrice < tree.previousClose;
 
   const MarketIcon = tree.marketOpen ? Sun : Moon;
 
@@ -67,6 +68,8 @@ export default async function TreePage({ params }: PageProps<"/tree/[id]">) {
               healthLabel={tree.healthLabel}
               healthUnit={healthPercentToUnit(tree.healthScore)}
               volatility={tree.volatility}
+              skin={tree.skin}
+              shedding={downToday}
               peakReturnPct={tree.peakReturnPct}
               totalReturnPct={totalReturnPct}
               return30dPct={tree.return30dPct}

@@ -66,6 +66,8 @@ export interface TreeGeometryInputs {
   structureStage: number;
   /** 0 – 1. Elevated 20-day stdev → a gnarlier, wilder tree. */
   volatility: number;
+  /** skin's leaf-size multiplier — baked into billboard geometry. */
+  leafSizeMul: number;
 }
 
 interface StageGeom {
@@ -105,7 +107,7 @@ export function volatilityBucket(volatility: number): number {
 export function applyGeometryOptions(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   o: any,
-  { seed, structureStage, volatility }: TreeGeometryInputs,
+  { seed, structureStage, volatility, leafSizeMul }: TreeGeometryInputs,
 ): void {
   const g = STAGE_GEOM[stageIndex(structureStage)];
   const gnarl = 0.5 + clamp01(volatility) * 3.1;
@@ -152,15 +154,15 @@ export function applyGeometryOptions(
     3: 0,
   };
 
-  o.leaves.type = "oak";
+  o.leaves.type = "oak"; // texture is overridden per skin on the material
   o.leaves.billboard = "double";
   o.leaves.angle = 40;
   o.leaves.count = g.leafCount;
   o.leaves.start = g.leafStart;
-  o.leaves.size = g.leafSize;
+  o.leaves.size = g.leafSize * leafSizeMul;
   o.leaves.sizeVariance = 0.7;
   o.leaves.tint = 0xffffff; // real colour is set on the material at runtime
-  o.leaves.alphaTest = 0.5;
+  o.leaves.alphaTest = 0.4;
 }
 
 /** Roughly where the visual centre of the canopy sits, in world units. */
@@ -172,31 +174,7 @@ export function focusHeight(structureStage: number): number {
 /* MATERIAL — no regeneration                                          */
 /* ------------------------------------------------------------------ */
 
-// Leaf tint multiplied over the (green) leaf texture: vivid green when
-// thriving, muted yellow-green at steady, yellow-orange stressed, brown dying.
-const LEAF_TINT_STOPS: { at: number; rgb: [number, number, number] }[] = [
-  { at: -1.0, rgb: [0x86, 0x66, 0x3a] },
-  { at: -0.45, rgb: [0xc6, 0xa5, 0x4e] },
-  { at: -0.1, rgb: [0xcb, 0xd2, 0x8f] },
-  { at: 0.25, rgb: [0xd7, 0xe6, 0xb2] },
-  { at: 1.0, rgb: [0xe9, 0xf3, 0xd6] },
-];
-
-export function healthToLeafColor(healthScore: number): string {
-  const h = clamp(-1, 1, healthScore);
-  let a = LEAF_TINT_STOPS[0];
-  let b = LEAF_TINT_STOPS[LEAF_TINT_STOPS.length - 1];
-  for (let i = 1; i < LEAF_TINT_STOPS.length; i++) {
-    if (h <= LEAF_TINT_STOPS[i].at) {
-      a = LEAF_TINT_STOPS[i - 1];
-      b = LEAF_TINT_STOPS[i];
-      break;
-    }
-  }
-  const t = (h - a.at) / (b.at - a.at || 1);
-  const c = (i: number) => Math.round(lerp(a.rgb[i], b.rgb[i], clamp01(t)));
-  return `rgb(${c(0)}, ${c(1)}, ${c(2)})`;
-}
+// Leaf colour is now per-skin — see skinLeafColor() in lib/tree-skins.ts.
 
 /** Fraction of leaves to draw (via drawRange), by health. */
 export function healthToLeafDensity(healthScore: number): number {
