@@ -50,8 +50,10 @@ function skinTexture(url: string): THREE.Texture {
   let tex = skinTextureCache.get(url);
   if (!tex) {
     tex = textureLoader.load(url);
+    // colour texture, not linear data — without this it renders washed out
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = 8;
+    tex.needsUpdate = true;
     skinTextureCache.set(url, tex);
   }
   return tex;
@@ -156,27 +158,41 @@ function shuffleLeafIndices(tree: Tree, seed: number): number {
   return blocks * LEAF_INDEX_BLOCK;
 }
 
+/** Resolve a skin to its leaf texture — its own PNG, or ez-tree's native one. */
+function resolveLeafTexture(
+  skin: LeafSkin,
+  nativeTex: THREE.Texture | null,
+): THREE.Texture | null {
+  return skin.texture ? skinTexture(skin.texture) : nativeTex;
+}
+
 /**
  * Skin + healthScore → leaf texture, colour, and canopy density. All of it is
  * MATERIAL / drawRange work — no Tree.generate(). (Only the skin's leaf *size*
  * is geometry; that lives in the geometry effect.)
+ *
+ * The material itself is ez-tree's own MeshPhongMaterial (DoubleSide, dithering,
+ * the wind shader, alphaTest from options) — we only mutate map / color /
+ * drawRange, never replace it.
  */
 function applyLeafMaterial(
   tree: Tree,
   maxLeafIndex: number,
   health: number,
   skin: LeafSkin,
+  nativeTex: THREE.Texture | null,
 ) {
   const mat = tree.leavesMesh.material as THREE.MeshPhongMaterial;
   if (!mat) return;
 
-  const tex = skinTexture(skin.texture);
-  if (mat.map !== tex) {
+  const tex = resolveLeafTexture(skin, nativeTex);
+  if (tex && mat.map !== tex) {
     mat.map = tex;
     mat.needsUpdate = true;
   }
+  // Subtle tint only — a saturated multiply flattens the texture.
   mat.color.set(skinLeafColor(skin, health));
-  mat.opacity = health < -0.45 ? 0.92 : 1;
+  mat.opacity = health < -0.5 ? 0.94 : 1;
   mat.transparent = mat.opacity < 1;
 
   const frac = Math.min(1, healthToLeafDensity(health) * skin.densityMul);
@@ -197,13 +213,16 @@ function EzTreeObject({
   volatility,
   skin: skinId,
   onBounds,
+  onNativeLeafTexture,
 }: Omit<Tree3DSceneProps, "interactive" | "shedding"> & {
   onBounds: (b: TreeBounds) => void;
+  onNativeLeafTexture: (t: THREE.Texture | null) => void;
 }) {
   // One imperative THREE.Group for the life of the component. useState's lazy
   // initialiser gives a stable instance; React never reconciles its internals.
   const [tree] = useState(() => new Tree());
   const maxLeafIndexRef = useRef(0);
+  const nativeLeafTexRef = useRef<THREE.Texture | null>(null);
   const skin = getSkin(skinId);
 
   const seed = hashToSeed(ticker);
@@ -223,6 +242,11 @@ function EzTreeObject({
     });
     tree.generate();
     maxLeafIndexRef.current = shuffleLeafIndices(tree, seed);
+    // ez-tree assigns its native leaf texture (oak) here — grab it before any
+    // skin override so the "default" skin can render it untouched.
+    nativeLeafTexRef.current =
+      (tree.leavesMesh.material as THREE.MeshPhongMaterial).map ?? null;
+    onNativeLeafTexture(nativeLeafTexRef.current);
     for (const m of [tree.branchesMesh, tree.leavesMesh]) {
       m.castShadow = true;
       m.receiveShadow = true;
@@ -238,13 +262,27 @@ function EzTreeObject({
         1,
       ),
     });
-  }, [tree, seed, structureStage, bucketedVolatility, skin.leafSizeMul, onBounds]);
+  }, [
+    tree,
+    seed,
+    structureStage,
+    bucketedVolatility,
+    skin.leafSizeMul,
+    onBounds,
+    onNativeLeafTexture,
+  ]);
 
   // MATERIAL — skin + healthScore. Texture / tint / drawRange only, no rebuild.
   // structureStage / bucket / skin are deps so it re-applies to the fresh
   // material after any regenerate.
   useEffect(() => {
-    applyLeafMaterial(tree, maxLeafIndexRef.current, healthScore, skin);
+    applyLeafMaterial(
+      tree,
+      maxLeafIndexRef.current,
+      healthScore,
+      skin,
+      nativeLeafTexRef.current,
+    );
   }, [tree, healthScore, skin, structureStage, bucketedVolatility]);
 
   // dispose on unmount
@@ -328,10 +366,13 @@ function CameraRig({
 
 function FallingLeaves({
   skin,
+  texture,
   healthScore,
   bounds,
 }: {
   skin: LeafSkin;
+  /** resolved leaf texture (skin PNG, or ez-tree's native one for default) */
+  texture: THREE.Texture | null;
   healthScore: number;
   bounds: TreeBounds;
 }) {
@@ -370,10 +411,10 @@ function FallingLeaves({
   );
 
   useEffect(() => {
-    material.map = skinTexture(skin.texture);
+    material.map = texture;
     material.color.set(skinLeafColor(skin, healthScore));
     material.needsUpdate = true;
-  }, [material, skin, healthScore]);
+  }, [material, texture, skin, healthScore]);
 
   useEffect(() => () => {
     geometry.dispose();
@@ -438,6 +479,7 @@ function SceneContents({
   interactive = false,
 }: Tree3DSceneProps) {
   const [bounds, setBounds] = useState<TreeBounds>({ height: 28, radius: 12 });
+  const [nativeLeafTex, setNativeLeafTex] = useState<THREE.Texture | null>(null);
   const { focusY } = frameCamera(bounds);
   const skin = getSkin(skinId);
 
@@ -483,12 +525,18 @@ function SceneContents({
           volatility={volatility}
           skin={skinId}
           onBounds={setBounds}
+          onNativeLeafTexture={setNativeLeafTex}
         />
       </SceneErrorBoundary>
 
       {shedding && (
         <SceneErrorBoundary>
-          <FallingLeaves skin={skin} healthScore={healthScore} bounds={bounds} />
+          <FallingLeaves
+            skin={skin}
+            texture={resolveLeafTexture(skin, nativeLeafTex)}
+            healthScore={healthScore}
+            bounds={bounds}
+          />
         </SceneErrorBoundary>
       )}
 

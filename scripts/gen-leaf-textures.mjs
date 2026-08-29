@@ -73,14 +73,6 @@ const ellipse = (cx, cy, rx, ry, rot = 0) => {
   };
 };
 
-const roundRect = (x0, y0, w, h, rad) => (x, y) => {
-  const qx = Math.abs(x - (x0 + w / 2)) - (w / 2 - rad);
-  const qy = Math.abs(y - (y0 + h / 2)) - (h / 2 - rad);
-  const ax = Math.max(qx, 0);
-  const ay = Math.max(qy, 0);
-  return Math.hypot(ax, ay) + Math.min(Math.max(qx, qy), 0) - rad;
-};
-
 const capsule = (x1, y1, x2, y2, width) => (x, y) => {
   const pax = x - x1;
   const pay = y - y1;
@@ -146,118 +138,145 @@ function encodePNG(img) {
 
 /* ---------- the three skins ---------- */
 
-// DEFAULT — a single simple deciduous leaf, mid-saturated green
-function drawDefault() {
-  const img = canvas();
-  const cx = S / 2;
-  const blade = hex("#7ba33f");
-  const bladeDark = hex("#5f8a34");
-  const tip = hex("#93b95a");
-  const rib = hex("#4a6f2b");
-  const shape = ellipse(cx, S * 0.52, S * 0.22, S * 0.4);
-  const clip = (sdf) => (x, y) => Math.max(sdf(x, y), shape(x, y) + 3);
-  // blade
-  fillSDF(img, shape, blade);
-  fillSDF(img, clip((x, y) => (y < S * 0.34 ? shape(x, y) : 1e9)), withA(tip, 0.55));
-  fillSDF(img, clip((x, y) => (x > cx ? shape(x, y) : 1e9)), withA(bladeDark, 0.35));
-  // midrib + veins, clipped to the blade
-  fillSDF(img, clip(capsule(cx, S * 0.16, cx, S * 0.9, 9)), withA(rib, 0.75));
-  for (const [sy, ex, ey] of [
-    [0.36, 0.78, 0.3],
-    [0.52, 0.82, 0.48],
-    [0.68, 0.76, 0.68],
-  ]) {
-    fillSDF(img, clip(capsule(cx, S * sy, S * ex, S * ey, 5)), withA(rib, 0.45));
-    fillSDF(img, clip(capsule(cx, S * sy, S * (1 - ex), S * ey, 5)), withA(rib, 0.45));
-  }
-  return img;
-}
-
-// CHERRY BLOSSOM — five notched petals + stamen centre, saturated pink
-function drawCherry() {
-  const img = canvas();
-  const cx = S / 2;
-  const cy = S / 2;
-  const petal = hex("#ff7fb3");
-  const petalLo = hex("#ff9ec6");
-  const notch = hex("#ff5fa0");
-  const centre = hex("#ffd766");
-  for (let k = 0; k < 5; k++) {
-    const a = (k / 5) * Math.PI * 2 - Math.PI / 2;
-    const px = cx + Math.cos(a) * S * 0.26;
-    const py = cy + Math.sin(a) * S * 0.26;
-    fillSDF(img, ellipse(px, py, S * 0.15, S * 0.19, a + Math.PI / 2), petal);
-    // lighter inner
-    fillSDF(
-      img,
-      ellipse(
-        cx + Math.cos(a) * S * 0.18,
-        cy + Math.sin(a) * S * 0.18,
-        S * 0.09,
-        S * 0.12,
-        a + Math.PI / 2,
-      ),
-      withA(petalLo, 0.7),
-    );
-    // the sakura tip notch: carve with background, then a darker seam
-    const nx = cx + Math.cos(a) * S * 0.42;
-    const ny = cy + Math.sin(a) * S * 0.42;
-    fillSDF(img, disc(nx, ny, S * 0.035), [0, 0, 0, 0]);
-    fillSDF(img, capsule(px, py, nx, ny, 7), withA(notch, 0.5));
-  }
-  fillSDF(img, disc(cx, cy, S * 0.075), centre);
-  for (let k = 0; k < 10; k++) {
-    const a = (k / 10) * Math.PI * 2;
-    fillSDF(
-      img,
-      disc(cx + Math.cos(a) * S * 0.11, cy + Math.sin(a) * S * 0.11, S * 0.014),
-      hex("#ffcf5a"),
-    );
-  }
-  return img;
-}
-
-// MONEY — a rounded banknote, crisp green, portrait oval + border + numerals
-function drawMoney() {
-  const img = canvas();
-  const w = S * 0.9;
-  const h = S * 0.46;
-  const x0 = (S - w) / 2;
-  const y0 = (S - h) / 2;
-  const bill = hex("#5aa06a");
-  const billEdge = hex("#3c7a4e");
-  const ink = hex("#2f5d3c");
-  const paper = hex("#a9cdb0");
-  fillSDF(img, roundRect(x0, y0, w, h, 46), bill);
-  // inner frame
-  fillSDF(img, (x, y) => {
-    const outer = roundRect(x0 + 26, y0 + 26, w - 52, h - 52, 30)(x, y);
-    const inner = roundRect(x0 + 40, y0 + 40, w - 80, h - 80, 24)(x, y);
-    return Math.max(outer, -inner);
-  }, withA(ink, 0.85));
-  // portrait oval
-  fillSDF(img, ellipse(S / 2, S / 2, S * 0.11, S * 0.15), paper);
-  fillSDF(img, (x, y) => {
-    const d = ellipse(S / 2, S / 2, S * 0.11, S * 0.15)(x, y);
-    return Math.max(d, -ellipse(S / 2, S / 2, S * 0.09, S * 0.13)(x, y));
-  }, withA(billEdge, 0.9));
-  // corner discs (denomination medallions)
-  for (const sx of [x0 + 92, x0 + w - 92]) {
-    for (const sy of [y0 + 74, y0 + h - 74]) {
-      fillSDF(img, disc(sx, sy, 34), withA(paper, 0.9));
-      fillSDF(img, (x, y) => {
-        const d = disc(sx, sy, 34)(x, y);
-        return Math.max(d, -disc(sx, sy, 24)(x, y));
-      }, withA(ink, 0.9));
+// Directional shade over whatever alpha already exists, for form. `dir` in
+// radians; darker toward that side, lighter toward the opposite.
+function shade(img, cx, cy, radius, dir, darkColor, lightColor, strength = 0.5) {
+  const dx = Math.cos(dir);
+  const dy = Math.sin(dir);
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const i = (y * S + x) * 4;
+      if (img[i + 3] <= 0) continue;
+      const t = ((x - cx) * dx + (y - cy) * dy) / radius; // -1..1 across shape
+      if (t < 0) blend(img, x, y, Math.min(1, -t) * strength, withA(darkColor, 1));
+      else blend(img, x, y, Math.min(1, t) * strength * 0.7, withA(lightColor, 1));
     }
   }
-  // guilloché lines
-  for (let i = 0; i < 5; i++) {
-    const yy = y0 + 70 + i * 12;
-    fillSDF(img, capsule(x0 + 150, yy, x0 + w - 150, yy, 3), withA(ink, 0.25));
-    const yb = y0 + h - 70 - i * 12;
-    fillSDF(img, capsule(x0 + 150, yb, x0 + w - 150, yb, 3), withA(ink, 0.25));
+}
+
+// per-pixel grain on painted pixels — kills the "flat vector" read
+function grain(img, amount) {
+  const rand = mulberry32(0xa11);
+  for (let i = 0; i < img.length; i += 4) {
+    if (img[i + 3] <= 0.01) continue;
+    const n = (rand() - 0.5) * amount;
+    img[i] = Math.min(1, Math.max(0, img[i] + n));
+    img[i + 1] = Math.min(1, Math.max(0, img[i + 1] + n));
+    img[i + 2] = Math.min(1, Math.max(0, img[i + 2] + n));
   }
+}
+
+// mulberry32, inline (same as the runtime seed RNG)
+function mulberry32(a) {
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// One sakura flower centred at (cx,cy).
+function blossom(img, cx, cy, r, rot, rand) {
+  const petal = hex("#ff86b8");
+  const petalLo = hex("#ffd0e2");
+  const petalHi = hex("#ff5fa0");
+  const centre = hex("#ffd35e");
+  for (let k = 0; k < 5; k++) {
+    const a = rot + (k / 5) * Math.PI * 2;
+    const px = cx + Math.cos(a) * r * 0.55;
+    const py = cy + Math.sin(a) * r * 0.55;
+    fillSDF(img, ellipse(px, py, r * 0.42, r * 0.56, a + Math.PI / 2), petal);
+    fillSDF(
+      img,
+      ellipse(cx + Math.cos(a) * r * 0.36, cy + Math.sin(a) * r * 0.36, r * 0.24, r * 0.32, a + Math.PI / 2),
+      withA(petalLo, 0.75),
+    );
+    // notched tip
+    const nx = cx + Math.cos(a) * r * 1.15;
+    const ny = cy + Math.sin(a) * r * 1.15;
+    fillSDF(img, disc(nx, ny, r * 0.12), [0, 0, 0, 0]);
+    fillSDF(img, capsule(px, py, nx, ny, r * 0.05), withA(petalHi, 0.4));
+  }
+  fillSDF(img, disc(cx, cy, r * 0.2), centre);
+  for (let k = 0; k < 9; k++) {
+    const a = (k / 9) * Math.PI * 2 + rand() * 0.4;
+    fillSDF(img, disc(cx + Math.cos(a) * r * 0.3, cy + Math.sin(a) * r * 0.3, r * 0.04), hex("#ffbf3d"));
+  }
+}
+
+// CHERRY — a spray: 3 blossoms + loose petals, so it reads as a cluster
+function drawCherry() {
+  const img = canvas();
+  const rand = mulberry32(0xc4e1);
+  const clusters = [
+    [S * 0.42, S * 0.4, S * 0.2, 0.2],
+    [S * 0.62, S * 0.56, S * 0.16, 1.1],
+    [S * 0.38, S * 0.66, S * 0.14, 2.3],
+  ];
+  for (const [cx, cy, r, rot] of clusters) blossom(img, cx, cy, r, rot, rand);
+  // loose petals
+  for (let i = 0; i < 6; i++) {
+    const px = S * (0.2 + rand() * 0.6);
+    const py = S * (0.2 + rand() * 0.6);
+    const pr = S * (0.05 + rand() * 0.04);
+    fillSDF(img, ellipse(px, py, pr, pr * 1.4, rand() * Math.PI), hex("#ff9ec6"));
+  }
+  shade(img, S / 2, S / 2, S * 0.5, -Math.PI * 0.35, hex("#b64f86"), hex("#ffd9e8"), 0.4);
+  grain(img, 0.05);
+  return img;
+}
+
+// One banknote rectangle.
+function bill(img, cx, cy, w, h, rot) {
+  const paper = hex("#5aa06a");
+  const ink = hex("#2c5b3c");
+  const light = hex("#8dc79a");
+  const c = Math.cos(-rot);
+  const s = Math.sin(-rot);
+  const rect = (bw, bh, rad) => (x, y) => {
+    const dx = x - cx;
+    const dy = y - cy;
+    const lx = dx * c - dy * s;
+    const ly = dx * s + dy * c;
+    const qx = Math.abs(lx) - (bw / 2 - rad);
+    const qy = Math.abs(ly) - (bh / 2 - rad);
+    return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - rad;
+  };
+  fillSDF(img, rect(w, h, 22), paper);
+  fillSDF(img, (x, y) => Math.max(rect(w - 34, h - 34, 16)(x, y), -rect(w - 58, h - 58, 12)(x, y)), withA(ink, 0.8));
+  fillSDF(img, ellipse(cx, cy, w * 0.13, h * 0.34, rot), withA(light, 0.85));
+  fillSDF(img, (x, y) => {
+    const e = ((px, py, rx, ry) => {
+      const dx = px - cx;
+      const dy = py - cy;
+      const lx = (dx * c - dy * s) / rx;
+      const ly = (dx * s + dy * c) / ry;
+      return (Math.hypot(lx, ly) - 1) * Math.min(rx, ry);
+    })(x, y, w * 0.13, h * 0.34);
+    const inner = ((px, py, rx, ry) => {
+      const dx = px - cx;
+      const dy = py - cy;
+      const lx = (dx * c - dy * s) / rx;
+      const ly = (dx * s + dy * c) / ry;
+      return (Math.hypot(lx, ly) - 1) * Math.min(rx, ry);
+    })(x, y, w * 0.1, h * 0.28);
+    return Math.max(e, -inner);
+  }, withA(ink, 0.75));
+}
+
+// MONEY — a small fan of overlapping banknotes
+function drawMoney() {
+  const img = canvas();
+  const bills = [
+    [S * 0.46, S * 0.54, S * 0.62, S * 0.34, -0.28],
+    [S * 0.56, S * 0.44, S * 0.6, S * 0.32, 0.12],
+    [S * 0.4, S * 0.42, S * 0.5, S * 0.28, 0.5],
+  ];
+  for (const [cx, cy, w, h, rot] of bills) bill(img, cx, cy, w, h, rot);
+  shade(img, S / 2, S / 2, S * 0.5, -Math.PI * 0.4, hex("#265239"), hex("#a9d6b4"), 0.42);
+  grain(img, 0.06);
   return img;
 }
 
@@ -265,7 +284,6 @@ function drawMoney() {
 
 mkdirSync(OUT, { recursive: true });
 for (const [name, draw] of [
-  ["default", drawDefault],
   ["cherry", drawCherry],
   ["money", drawMoney],
 ]) {

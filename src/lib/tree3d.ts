@@ -162,7 +162,7 @@ export function applyGeometryOptions(
   o.leaves.size = g.leafSize * leafSizeMul;
   o.leaves.sizeVariance = 0.7;
   o.leaves.tint = 0xffffff; // real colour is set on the material at runtime
-  o.leaves.alphaTest = 0.4;
+  o.leaves.alphaTest = 0.5; // ez-tree's default — crisp cutout edge
 }
 
 /** Roughly where the visual centre of the canopy sits, in world units. */
