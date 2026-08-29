@@ -206,6 +206,409 @@ export interface TreeBounds {
   radius: number;
 }
 
+/* ------------------------------------------------------------------ */
+/* skinned leaves — per-skin geometry, placement and rotation          */
+/* ------------------------------------------------------------------ */
+
+interface LeafAnchor {
+  pos: THREE.Vector3;
+  up: THREE.Vector3; // along the branch
+  normal: THREE.Vector3;
+  r: number; // 0 (trunk axis) .. 1 (canopy edge)
+  h: number; // 0 (ground) .. 1 (crown top)
+}
+
+// Read the attach point + basis of every leaf ez-tree baked, from
+// tree.leaves.verts (8 verts / leaf for a Double billboard; first quad is
+// v0=top-left v1=bottom-left v2=bottom-right v3=top-right).
+function extractLeafAnchors(tree: Tree, bounds: TreeBounds): LeafAnchor[] {
+  const v = tree.leaves.verts as number[];
+  const n = tree.leaves.normals as number[];
+  const stride = 24; // 8 verts * 3
+  const out: LeafAnchor[] = [];
+  const invR = 1 / Math.max(1, bounds.radius);
+  const invH = 1 / Math.max(1, bounds.height);
+  for (let i = 0; i + stride <= v.length; i += stride) {
+    const v0 = new THREE.Vector3(v[i], v[i + 1], v[i + 2]);
+    const v1 = new THREE.Vector3(v[i + 3], v[i + 4], v[i + 5]);
+    const v2 = new THREE.Vector3(v[i + 6], v[i + 7], v[i + 8]);
+    const v3 = new THREE.Vector3(v[i + 9], v[i + 10], v[i + 11]);
+    const pos = v1.clone().add(v2).multiplyScalar(0.5);
+    const top = v0.clone().add(v3).multiplyScalar(0.5);
+    const up = top.sub(pos).normalize();
+    const normal = new THREE.Vector3(n[i], n[i + 1], n[i + 2]).normalize();
+    out.push({
+      pos,
+      up,
+      normal,
+      r: Math.min(1, Math.hypot(pos.x, pos.z) * invR),
+      h: Math.min(1, Math.max(0, pos.y * invH)),
+    });
+  }
+  return out;
+}
+
+// 5-petal blossom — real geometry, not a quad. Petal colour + yellow centre are
+// baked as vertex colours; material.color (the health ramp) multiplies on top.
+function buildBlossomGeometry(): THREE.BufferGeometry {
+  const positions: number[] = [];
+  const colors: number[] = [];
+  const petal = [1.0, 0.55, 0.62]; // warm coral — survives blue skylight as pink
+  const centre = [1.0, 0.8, 0.42];
+  const push = (
+    p: [number, number, number],
+    c: number[],
+  ) => {
+    positions.push(p[0], p[1], p[2]);
+    colors.push(c[0], c[1], c[2]);
+  };
+  // 5 rounded, slightly cupped petals
+  for (let k = 0; k < 5; k++) {
+    const a = (k / 5) * Math.PI * 2;
+    const base: [number, number, number] = [0, 0, 0.07];
+    const l: [number, number, number] = [
+      Math.cos(a - 0.34) * 0.2,
+      Math.sin(a - 0.34) * 0.2,
+      0.035,
+    ];
+    const tl: [number, number, number] = [
+      Math.cos(a - 0.14) * 0.48,
+      Math.sin(a - 0.14) * 0.48,
+      0.005,
+    ];
+    const tr: [number, number, number] = [
+      Math.cos(a + 0.14) * 0.48,
+      Math.sin(a + 0.14) * 0.48,
+      0.005,
+    ];
+    const rr: [number, number, number] = [
+      Math.cos(a + 0.34) * 0.2,
+      Math.sin(a + 0.34) * 0.2,
+      0.035,
+    ];
+    push(base, petal);
+    push(l, petal);
+    push(tl, petal);
+    push(base, petal);
+    push(tl, petal);
+    push(tr, petal);
+    push(base, petal);
+    push(tr, petal);
+    push(rr, petal);
+  }
+  // centre disc
+  const segs = 8;
+  for (let k = 0; k < segs; k++) {
+    const a0 = (k / segs) * Math.PI * 2;
+    const a1 = ((k + 1) / segs) * Math.PI * 2;
+    push([0, 0, 0.09], centre);
+    push([Math.cos(a0) * 0.13, Math.sin(a0) * 0.13, 0.05], centre);
+    push([Math.cos(a1) * 0.13, Math.sin(a1) * 0.13, 0.05], centre);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  geo.computeVertexNormals();
+  return geo;
+}
+
+// A single flat petal, for the ground scatter.
+function buildPetalGeometry(): THREE.BufferGeometry {
+  const geo = new THREE.PlaneGeometry(0.5, 0.32);
+  return geo;
+}
+
+// Procedural paper-fibre normal map (matte banknote surface).
+function makePaperNormalTexture(): THREE.Texture {
+  const size = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  const rand = mulberry32(0x9a17);
+  const height = new Float32Array(size * size);
+  for (let i = 0; i < height.length; i++) height[i] = rand();
+  // smear horizontally into fibres
+  for (let y = 0; y < size; y++) {
+    for (let x = 1; x < size; x++) {
+      const i = y * size + x;
+      height[i] = height[i] * 0.4 + height[i - 1] * 0.6;
+    }
+  }
+  const img = ctx.createImageData(size, size);
+  const at = (x: number, y: number) =>
+    height[((y + size) % size) * size + ((x + size) % size)];
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dx = (at(x + 1, y) - at(x - 1, y)) * 2.2;
+      const dy = (at(x, y + 1) - at(x, y - 1)) * 2.2;
+      const nz = 1;
+      const len = Math.hypot(dx, dy, nz);
+      const j = (y * size + x) * 4;
+      img.data[j] = ((-dx / len) * 0.5 + 0.5) * 255;
+      img.data[j + 1] = ((-dy / len) * 0.5 + 0.5) * 255;
+      img.data[j + 2] = (nz / len) * 0.5 * 255 + 128;
+      img.data[j + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(2, 1);
+  return tex;
+}
+
+// Wind: rotate the instance about a pivot in the vertex shader (no per-frame
+// JS). Blossoms sway from the base (pivot 0); notes swing from the top edge.
+function attachWindShader(
+  mat: THREE.Material,
+  pivotY: number,
+  span: number,
+  amp: number,
+  initialWind: number,
+) {
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = { value: 0 };
+    shader.uniforms.uWind = { value: initialWind };
+    shader.uniforms.uPivotY = { value: pivotY };
+    shader.uniforms.uSpan = { value: span };
+    shader.uniforms.uAmp = { value: amp };
+    shader.vertexShader =
+      "uniform float uTime; uniform float uWind; uniform float uPivotY; uniform float uSpan; uniform float uAmp;\n" +
+      shader.vertexShader.replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+         vec3 iP = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
+         float ph = fract(sin(dot(iP.xz, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+         float d = clamp((uPivotY - transformed.y) / uSpan, 0.0, 1.0);
+         float sw = uWind * uAmp * (0.55 * sin(uTime * 1.5 + ph) + 0.3 * sin(uTime * 3.3 + ph * 1.7));
+         float ang = sw * d;
+         vec2 rp = transformed.xy - vec2(0.0, uPivotY);
+         rp = mat2(cos(ang), -sin(ang), sin(ang), cos(ang)) * rp;
+         transformed.xy = rp + vec2(0.0, uPivotY);`,
+      );
+    mat.userData.windShader = shader;
+  };
+}
+
+const _m = new THREE.Matrix4();
+const _q = new THREE.Quaternion();
+const _tmpQ = new THREE.Quaternion();
+const _s = new THREE.Vector3();
+const _tmpPos = new THREE.Vector3();
+
+function SkinnedLeaves({
+  tree,
+  gen,
+  skin,
+  healthScore,
+  volatility,
+  bounds,
+}: {
+  tree: Tree;
+  gen: number;
+  skin: LeafSkin;
+  healthScore: number;
+  volatility: number;
+  bounds: TreeBounds;
+}) {
+  const kind = skin.leaf.kind;
+  const wind =
+    volatilityToWind(volatility) *
+    skin.leaf.windAmp *
+    (kind === "note" ? 0.16 : 0.1);
+
+  // Build the instanced mesh(es) whenever the tree regenerates or the skin
+  // changes. Placement is seeded so it's stable per (tree, skin).
+  const built = useMemo(() => {
+    const anchors = extractLeafAnchors(tree, bounds);
+    if (anchors.length === 0) return null;
+    const rand = mulberry32(hashToSeed(`${skin.id}:${gen}`));
+
+    // pick anchors, biased along the branch (low r = inner branch). blossoms
+    // keep fewer anchors since each becomes a clump.
+    const bias = skin.leaf.branchBias;
+    const dMul = skin.leaf.densityMul;
+    const kept: LeafAnchor[] = [];
+    for (const a of anchors) {
+      const p =
+        dMul * (kind === "blossom" ? 0.4 : 0.9) * (1 - bias * a.r * 1.05) +
+        (1 - bias) * 0.08;
+      if (rand() < Math.max(0.04, Math.min(1, p))) kept.push(a);
+    }
+
+    const s = skin.leaf.size;
+    const h = s / skin.leaf.aspect;
+
+    let geo: THREE.BufferGeometry;
+    let mat: THREE.Material;
+    let pivotY: number;
+    let span: number;
+
+    if (kind === "blossom") {
+      geo = buildBlossomGeometry();
+      const m = new THREE.MeshStandardMaterial({
+        vertexColors: true,
+        roughness: 0.7,
+        metalness: 0,
+        side: THREE.DoubleSide,
+        // self-warmth so the blue skylight doesn't turn petals lavender
+        emissive: new THREE.Color("#c02a4e"),
+        emissiveIntensity: 0.6,
+      });
+      m.color.set(skinLeafColor(skin, healthScore));
+      mat = m;
+      pivotY = 0;
+      span = s;
+    } else {
+      // note
+      geo = new THREE.PlaneGeometry(s, h);
+      geo.translate(0, -h / 2, 0); // top edge at origin so it hangs
+      const m = new THREE.MeshStandardMaterial({
+        map: skin.texture ? skinTexture(skin.texture) : null,
+        normalMap: makePaperNormalTexture(),
+        roughness: 0.98,
+        metalness: 0,
+        side: THREE.DoubleSide,
+        transparent: true,
+        alphaTest: 0.5,
+      });
+      m.color.set(skinLeafColor(skin, healthScore));
+      mat = m;
+      pivotY = 0;
+      span = h;
+    }
+    attachWindShader(mat, pivotY, span, kind === "note" ? 1 : 0.6, wind);
+
+    // instance matrices
+    const matrices: THREE.Matrix4[] = [];
+    const clumpMin = skin.leaf.clusterSize[0];
+    const clumpMax = skin.leaf.clusterSize[1];
+    const cap = kind === "blossom" ? 3600 : 720;
+
+    for (const a of kept) {
+      const count =
+        skin.leaf.placement === "clustered"
+          ? clumpMin + Math.floor(rand() * (clumpMax - clumpMin + 1))
+          : 1;
+      for (let c = 0; c < count && matrices.length < cap; c++) {
+        _tmpPos.copy(a.pos);
+        if (count > 1) {
+          _tmpPos.x += (rand() - 0.5) * s * 1.4;
+          _tmpPos.y += (rand() - 0.5) * s * 1.4;
+          _tmpPos.z += (rand() - 0.5) * s * 1.4;
+        }
+        if (kind === "note") {
+          // hang: local +Y up, free spin about Y, small tilt
+          _q.setFromEuler(
+            new THREE.Euler(
+              (rand() - 0.5) * 0.5,
+              rand() * Math.PI * 2,
+              (rand() - 0.5) * 0.35,
+            ),
+          );
+          _s.setScalar(0.8 + rand() * 0.5);
+        } else {
+          // blossom: face along a jittered branch normal
+          const dir = a.normal
+            .clone()
+            .lerp(a.up, 0.25)
+            .add(
+              new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).multiplyScalar(
+                0.5,
+              ),
+            )
+            .normalize();
+          _q.setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
+          _q.multiply(
+            _tmpQ.setFromAxisAngle(new THREE.Vector3(0, 0, 1), rand() * Math.PI * 2),
+          );
+          _s.setScalar((0.7 + rand() * 0.6) * (s / 1.5));
+        }
+        matrices.push(_m.clone().compose(_tmpPos.clone(), _q.clone(), _s.clone()));
+      }
+    }
+
+    const mesh = new THREE.InstancedMesh(geo, mat, matrices.length);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.frustumCulled = false;
+    for (let i = 0; i < matrices.length; i++) mesh.setMatrixAt(i, matrices[i]);
+    mesh.instanceMatrix.needsUpdate = true;
+
+    // ground scatter (cherry only) — a few flat petals near the trunk
+    let ground: THREE.InstancedMesh | null = null;
+    if (kind === "blossom") {
+      const gGeo = buildPetalGeometry();
+      const gMat = new THREE.MeshStandardMaterial({
+        color: skin.particleTint,
+        roughness: 0.9,
+        metalness: 0,
+        side: THREE.DoubleSide,
+      });
+      const gn = 26;
+      ground = new THREE.InstancedMesh(gGeo, gMat, gn);
+      ground.receiveShadow = true;
+      for (let i = 0; i < gn; i++) {
+        const ang = rand() * Math.PI * 2;
+        const rad = Math.sqrt(rand()) * bounds.radius * 0.85;
+        _tmpPos.set(Math.cos(ang) * rad, 0.04 + rand() * 0.03, Math.sin(ang) * rad);
+        _q.setFromEuler(new THREE.Euler(-Math.PI / 2, rand() * Math.PI * 2, 0));
+        _s.setScalar(0.6 + rand() * 0.5);
+        ground.setMatrixAt(i, _m.clone().compose(_tmpPos.clone(), _q.clone(), _s.clone()));
+      }
+      ground.instanceMatrix.needsUpdate = true;
+    }
+
+    return { mesh, ground, geo, mat, count: matrices.length };
+  }, [tree, gen, skin, bounds.height, bounds.radius]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // health tint — MATERIAL only, no rebuild
+  useEffect(() => {
+    if (!built) return;
+    (built.mat as THREE.MeshStandardMaterial).color.set(
+      skinLeafColor(skin, healthScore),
+    );
+    if (built.ground) {
+      (built.ground.material as THREE.MeshStandardMaterial).color.set(
+        skin.particleTint,
+      );
+    }
+  }, [built, skin, healthScore]);
+
+  useEffect(() => {
+    return () => {
+      if (!built) return;
+      built.geo.dispose();
+      (built.mat as THREE.Material).dispose();
+      built.mesh.dispose();
+      if (built.ground) {
+        built.ground.geometry.dispose();
+        (built.ground.material as THREE.Material).dispose();
+        built.ground.dispose();
+      }
+    };
+  }, [built]);
+
+  useFrame((state) => {
+    const sh = (built?.mat as THREE.Material | undefined)?.userData
+      ?.windShader as
+      | { uniforms: Record<string, { value: number }> }
+      | undefined;
+    if (sh) {
+      sh.uniforms.uTime.value = state.clock.elapsedTime;
+      sh.uniforms.uWind.value = wind;
+    }
+  });
+
+  if (!built) return null;
+  return (
+    <>
+      <primitive object={built.mesh} />
+      {built.ground && <primitive object={built.ground} />}
+    </>
+  );
+}
+
 function EzTreeObject({
   ticker,
   structureStage,
@@ -224,6 +627,9 @@ function EzTreeObject({
   const maxLeafIndexRef = useRef(0);
   const nativeLeafTexRef = useRef<THREE.Texture | null>(null);
   const skin = getSkin(skinId);
+  // bumped on every regenerate — SkinnedLeaves re-reads the leaf anchors
+  const [gen, setGen] = useState(0);
+  const [localBounds, setLocalBounds] = useState<TreeBounds | null>(null);
 
   const seed = hashToSeed(ticker);
   const volBucket = volatilityBucket(volatility);
@@ -251,8 +657,11 @@ function EzTreeObject({
       m.castShadow = true;
       m.receiveShadow = true;
     }
+    // non-"sprite" skins replace ez-tree's leaf mesh with <SkinnedLeaves>
+    tree.leavesMesh.visible = skin.leaf.kind === "sprite";
+
     const box = new THREE.Box3().setFromObject(tree);
-    onBounds({
+    const b: TreeBounds = {
       height: Math.max(1, box.max.y),
       radius: Math.max(
         Math.abs(box.max.x),
@@ -261,21 +670,29 @@ function EzTreeObject({
         Math.abs(box.min.z),
         1,
       ),
-    });
+    };
+    // Publish the freshly generated geometry's bounds + a rebuild signal to
+    // <SkinnedLeaves>. One extra render per actual regenerate — not per frame.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLocalBounds(b);
+    onBounds(b);
+    setGen((g) => g + 1);
   }, [
     tree,
     seed,
     structureStage,
     bucketedVolatility,
-    skin.leafSizeMul,
+    skin,
     onBounds,
     onNativeLeafTexture,
   ]);
 
   // MATERIAL — skin + healthScore. Texture / tint / drawRange only, no rebuild.
-  // structureStage / bucket / skin are deps so it re-applies to the fresh
-  // material after any regenerate.
+  // For non-sprite skins the ez-tree leaf mesh stays hidden; SkinnedLeaves owns
+  // the canopy.
   useEffect(() => {
+    tree.leavesMesh.visible = skin.leaf.kind === "sprite";
+    if (skin.leaf.kind !== "sprite") return;
     applyLeafMaterial(
       tree,
       maxLeafIndexRef.current,
@@ -310,7 +727,23 @@ function EzTreeObject({
     }
   });
 
-  return <primitive object={tree} />;
+  return (
+    <>
+      <primitive object={tree} />
+      {skin.leaf.kind !== "sprite" && localBounds && (
+        <SceneErrorBoundary>
+          <SkinnedLeaves
+            tree={tree}
+            gen={gen}
+            skin={skin}
+            healthScore={healthScore}
+            volatility={volatility}
+            bounds={localBounds}
+          />
+        </SceneErrorBoundary>
+      )}
+    </>
+  );
 }
 
 /* ------------------------------------------------------------------ */

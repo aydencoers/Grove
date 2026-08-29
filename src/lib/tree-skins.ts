@@ -2,13 +2,16 @@
  * Leaf skins. Adding a new skin (e.g. autumn) is one entry in LEAF_SKINS —
  * no new branches anywhere.
  *
- * ez-tree check (node_modules/@dgreenheck/ez-tree/src/lib/tree.js): the leaf
- * TEXTURE is `mat.map` in createLeavesGeometry — a MATERIAL property. Swapping
- * it does not require Tree.generate(). Same for the colour ramp (mat.color) and
- * density (geometry.drawRange). Only `leafSizeMul` touches geometry
- * (options.leaves.size is baked into the billboard verts), so switching skins
- * does ONE rebuild — acceptable because skin is a set-once-per-planting
- * preference, not a daily value like healthScore.
+ * A skin is NOT just a texture. Each skin declares its own leaf GEOMETRY,
+ * PLACEMENT and ROTATION (the `leaf` block below):
+ *   - "sprite"  — ez-tree's own billboard leaves, unchanged. We only tint the
+ *     material + trim drawRange. No regenerate. (this is "default")
+ *   - "blossom" / "note" — ez-tree's leaf mesh is hidden and replaced by our own
+ *     InstancedMesh, placed from the tree's leaf-anchor points. See
+ *     <SkinnedLeaves> in tree-3d-scene.tsx.
+ *
+ * `leafSizeMul` still feeds ez-tree's options.leaves.size (sprite only) and so
+ * costs one regenerate on change; everything else about a skin is applied live.
  *
  * SPEC §3 conflict, resolved: the "earnings beat → blossoms for 3 days" event
  * is meaningless on a cherry-skinned tree (already all blossom). When events
@@ -18,27 +21,51 @@
  */
 
 export type SkinId = "default" | "cherry" | "money";
+export type LeafKind = "sprite" | "blossom" | "note";
+
+export interface LeafGeometry {
+  kind: LeafKind;
+  /** long dimension, world units. */
+  size: number;
+  /** width : height. 1 = round, 2.4 = banknote. */
+  aspect: number;
+  /** instance count vs. ez-tree's leaf-anchor count. */
+  densityMul: number;
+  placement: "even" | "clustered";
+  /** clustered only: [min, max] instances per clump. */
+  clusterSize: [number, number];
+  /** 0 = out at the branch tips, 1 = tight on the inner/middle branch. */
+  branchBias: number;
+  /** "leaf" = follow the branch; "hang" = dangle from the attach point, spin freely. */
+  rotation: "leaf" | "hang";
+  /** "leaf" = translucent standard; "paper" = matte, rough, fibre normal map. */
+  material: "leaf" | "paper";
+  /** wind response, multiplies the tree's volatility-driven wind. */
+  windAmp: number;
+}
 
 export interface LeafSkin {
   id: SkinId;
   label: string;
   /**
-   * public/ URL of the 1024² alpha-cutout PNG (matches ez-tree's own leaf
-   * textures). `null` = use ez-tree's native leaf texture (the detailed oak
-   * leaf spray) unchanged — that is the "default" look.
+   * public/ URL of the 1024² alpha-cutout PNG. Used by the "sprite" and (as a
+   * fallback tint reference) particle systems. `null` = ez-tree's native leaf
+   * texture. Ignored by "blossom" (pure geometry).
    */
   texture: string | null;
-  /** multiplier on the stage's base leaf size — GEOMETRY (one rebuild on change). */
+  /** multiplier on ez-tree's leaf size — GEOMETRY (sprite only; one rebuild). */
   leafSizeMul: number;
-  /** multiplier on the health-driven canopy density — MATERIAL (drawRange, no rebuild). */
+  /** health-driven canopy density multiplier — MATERIAL drawRange (sprite only). */
   densityMul: number;
+  /** per-skin geometry / placement / rotation. */
+  leaf: LeafGeometry;
   /**
    * three-stop health ramp, multiplied onto material.color — MATERIAL. Keep it
-   * SUBTLE: "thriving" should be ~white so the texture reads at full richness;
-   * only shift + darken as health drops.
+   * SUBTLE: "thriving" should be ~white so the texture/geometry colour reads at
+   * full richness; only shift + darken as health drops.
    */
   ramp: { thriving: string; stressed: string; dying: string };
-  /** tint for the falling-leaf particles on a down day. */
+  /** tint for the falling / ground scatter on a down day. */
   particleTint: string;
 }
 
@@ -49,6 +76,18 @@ export const LEAF_SKINS: Record<SkinId, LeafSkin> = {
     texture: null, // ez-tree's native oak leaf texture, untouched
     leafSizeMul: 1,
     densityMul: 1,
+    leaf: {
+      kind: "sprite",
+      size: 2.3,
+      aspect: 1,
+      densityMul: 1,
+      placement: "even",
+      clusterSize: [1, 1],
+      branchBias: 0,
+      rotation: "leaf",
+      material: "leaf",
+      windAmp: 1,
+    },
     ramp: { thriving: "#fbfaf3", stressed: "#d7d0a6", dying: "#7a5f3c" },
     particleTint: "#9db566",
   },
@@ -58,6 +97,20 @@ export const LEAF_SKINS: Record<SkinId, LeafSkin> = {
     texture: "/textures/leaves/cherry.png",
     leafSizeMul: 0.95,
     densityMul: 1.1,
+    leaf: {
+      // real 5-petal blossom geometry, tight clumps hugging the inner branch,
+      // denser than green, with bare wood showing through at the tips
+      kind: "blossom",
+      size: 1.7,
+      aspect: 1,
+      densityMul: 1.9,
+      placement: "clustered",
+      clusterSize: [4, 7],
+      branchBias: 0.62,
+      rotation: "leaf",
+      material: "leaf",
+      windAmp: 0.55,
+    },
     ramp: { thriving: "#fbe6ee", stressed: "#e7cdd6", dying: "#8f7168" },
     particleTint: "#f2b6cd",
   },
@@ -67,6 +120,20 @@ export const LEAF_SKINS: Record<SkinId, LeafSkin> = {
     texture: "/textures/leaves/money.png",
     leafSizeMul: 1.1,
     densityMul: 0.82,
+    leaf: {
+      // rigid 2.4:1 banknotes, hanging from the attach point, spun to varied
+      // angles (some edge-on), sparser than green, matte paper
+      kind: "note",
+      size: 3,
+      aspect: 2.4,
+      densityMul: 0.8,
+      placement: "even",
+      clusterSize: [1, 1],
+      branchBias: 0.22,
+      rotation: "hang",
+      material: "paper",
+      windAmp: 1.15,
+    },
     ramp: { thriving: "#f2f4ea", stressed: "#cdccb8", dying: "#8f8f88" },
     particleTint: "#9bb886",
   },
