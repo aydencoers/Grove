@@ -266,16 +266,24 @@ function bill(img, cx, cy, w, h, rot) {
   }, withA(ink, 0.75));
 }
 
-// MONEY — a small fan of overlapping banknotes
+// MONEY — a SINGLE banknote filling the frame (each instanced plane is one bill)
 function drawMoney() {
   const img = canvas();
-  const bills = [
-    [S * 0.46, S * 0.54, S * 0.62, S * 0.34, -0.28],
-    [S * 0.56, S * 0.44, S * 0.6, S * 0.32, 0.12],
-    [S * 0.4, S * 0.42, S * 0.5, S * 0.28, 0.5],
-  ];
-  for (const [cx, cy, w, h, rot] of bills) bill(img, cx, cy, w, h, rot);
-  shade(img, S / 2, S / 2, S * 0.5, -Math.PI * 0.4, hex("#265239"), hex("#a9d6b4"), 0.42);
+  bill(img, S * 0.5, S * 0.5, S * 0.94, S * 0.42, 0);
+  // faint denomination numerals in the corners
+  const ink = hex("#2c5b3c");
+  for (const [nx, ny] of [
+    [S * 0.14, S * 0.3],
+    [S * 0.86, S * 0.7],
+  ]) {
+    fillSDF(img, disc(nx, ny, S * 0.05), withA(hex("#a9d6b4"), 0.9));
+    fillSDF(
+      img,
+      (x, y) => Math.max(disc(nx, ny, S * 0.05)(x, y), -disc(nx, ny, S * 0.035)(x, y)),
+      withA(ink, 0.9),
+    );
+  }
+  shade(img, S / 2, S / 2, S * 0.5, -Math.PI * 0.4, hex("#265239"), hex("#a9d6b4"), 0.4);
   grain(img, 0.06);
   return img;
 }

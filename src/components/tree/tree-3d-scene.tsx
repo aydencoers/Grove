@@ -424,16 +424,28 @@ function SkinnedLeaves({
     if (anchors.length === 0) return null;
     const rand = mulberry32(hashToSeed(`${skin.id}:${gen}`));
 
-    // pick anchors, biased along the branch (low r = inner branch). blossoms
-    // keep fewer anchors since each becomes a clump.
+    // Shuffle so that hitting the instance cap thins the canopy UNIFORMLY
+    // instead of lopping off whichever branches ez-tree generated last (that
+    // was the "bare patches on one side" bug).
+    const shuffled = anchors.slice();
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      const t = shuffled[i];
+      shuffled[i] = shuffled[j];
+      shuffled[j] = t;
+    }
+
+    // Keep a HIGH fraction of anchors — coverage first. branchBias only trims
+    // the outer third of the canopy, and even there never below ~55%, so the
+    // edge is thinner but never empty.
     const bias = skin.leaf.branchBias;
     const dMul = skin.leaf.densityMul;
+    const baseKeep = kind === "blossom" ? 0.6 : 0.42;
     const kept: LeafAnchor[] = [];
-    for (const a of anchors) {
-      const p =
-        dMul * (kind === "blossom" ? 0.4 : 0.9) * (1 - bias * a.r * 1.05) +
-        (1 - bias) * 0.08;
-      if (rand() < Math.max(0.04, Math.min(1, p))) kept.push(a);
+    for (const a of shuffled) {
+      const edgeTrim = 1 - bias * Math.max(0, a.r - 0.35) * 1.1;
+      if (rand() < Math.min(1, baseKeep * dMul * Math.max(0.55, edgeTrim)))
+        kept.push(a);
     }
 
     const s = skin.leaf.size;
@@ -460,9 +472,19 @@ function SkinnedLeaves({
       pivotY = 0;
       span = s;
     } else {
-      // note
-      geo = new THREE.PlaneGeometry(s, h);
+      // note — ONE flat quad, gently curled so it reads as paper not card
+      geo = new THREE.PlaneGeometry(s, h, 10, 3);
       geo.translate(0, -h / 2, 0); // top edge at origin so it hangs
+      const p = geo.attributes.position;
+      for (let i = 0; i < p.count; i++) {
+        const u = p.getX(i) / s; // -0.5 .. 0.5
+        const vy = p.getY(i) / h;
+        p.setZ(
+          i,
+          Math.sin(u * Math.PI) * s * 0.05 + Math.sin(vy * Math.PI * 1.6) * s * 0.02,
+        );
+      }
+      geo.computeVertexNormals();
       const m = new THREE.MeshStandardMaterial({
         map: skin.texture ? skinTexture(skin.texture) : null,
         normalMap: makePaperNormalTexture(),
@@ -470,7 +492,9 @@ function SkinnedLeaves({
         metalness: 0,
         side: THREE.DoubleSide,
         transparent: true,
-        alphaTest: 0.5,
+        alphaTest: 0.45,
+        emissive: new THREE.Color("#1f5a34"),
+        emissiveIntensity: 0.28,
       });
       m.color.set(skinLeafColor(skin, healthScore));
       mat = m;
@@ -479,34 +503,42 @@ function SkinnedLeaves({
     }
     attachWindShader(mat, pivotY, span, kind === "note" ? 1 : 0.6, wind);
 
-    // instance matrices
+    // instance matrices — generous caps (instanced tris are cheap); the
+    // shuffle above makes any cap thinning spatially uniform.
     const matrices: THREE.Matrix4[] = [];
     const clumpMin = skin.leaf.clusterSize[0];
     const clumpMax = skin.leaf.clusterSize[1];
-    const cap = kind === "blossom" ? 3600 : 720;
+    const cap = kind === "blossom" ? 5200 : 1100;
 
     for (const a of kept) {
-      const count =
-        skin.leaf.placement === "clustered"
-          ? clumpMin + Math.floor(rand() * (clumpMax - clumpMin + 1))
-          : 1;
+      // inner branches carry bigger clumps; the outer edge still gets 1–2 so
+      // there are no holes, just a lighter fringe with wood showing.
+      const innerness = 1 - a.r; // 0 at the canopy edge, 1 at the trunk
+      let count = 1;
+      if (skin.leaf.placement === "clustered") {
+        const span01 = clumpMin + (clumpMax - clumpMin) * (0.3 + 0.7 * innerness);
+        count = Math.max(1, Math.round(span01 * (0.6 + 0.4 * rand())));
+      }
       for (let c = 0; c < count && matrices.length < cap; c++) {
+        // always jitter off the exact anchor so big planes never stack
+        const jr = count > 1 ? s * 1.3 : s * 0.75;
         _tmpPos.copy(a.pos);
-        if (count > 1) {
-          _tmpPos.x += (rand() - 0.5) * s * 1.4;
-          _tmpPos.y += (rand() - 0.5) * s * 1.4;
-          _tmpPos.z += (rand() - 0.5) * s * 1.4;
-        }
+        _tmpPos.addScaledVector(a.up, (rand() - 0.5) * jr * 1.3);
+        _tmpPos.addScaledVector(a.normal, (rand() - 0.5) * jr);
+        _tmpPos.x += (rand() - 0.5) * jr * 0.6;
+        _tmpPos.z += (rand() - 0.5) * jr * 0.6;
+
         if (kind === "note") {
-          // hang: local +Y up, free spin about Y, small tilt
+          // hang from the top edge, tumbled on all three axes, no two alike —
+          // enough tilt that some read edge-on, not so much they all do
           _q.setFromEuler(
             new THREE.Euler(
-              (rand() - 0.5) * 0.5,
+              (rand() - 0.5) * 1.05,
               rand() * Math.PI * 2,
-              (rand() - 0.5) * 0.35,
+              (rand() - 0.5) * 0.8,
             ),
           );
-          _s.setScalar(0.8 + rand() * 0.5);
+          _s.set(0.9 + rand() * 0.55, 0.85 + rand() * 0.6, 1);
         } else {
           // blossom: face along a jittered branch normal
           const dir = a.normal
@@ -514,7 +546,7 @@ function SkinnedLeaves({
             .lerp(a.up, 0.25)
             .add(
               new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).multiplyScalar(
-                0.5,
+                0.6,
               ),
             )
             .normalize();
