@@ -1,6 +1,4 @@
-import type { CSSProperties } from "react";
-
-import { Tree } from "@/components/tree/tree";
+import { Tree3D } from "@/components/tree/tree-3d";
 import { formatSignedPct } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -11,6 +9,8 @@ interface TreeStageProps {
   healthLabel: string;
   /** Tree healthScore in [-1, 1]. */
   healthUnit: number;
+  /** 0–1, elevated 20-day stdev. */
+  volatility: number;
   peakReturnPct: number;
   totalReturnPct: number;
   return30dPct: number;
@@ -19,9 +19,8 @@ interface TreeStageProps {
 const TOTAL_STAGES = 5;
 
 /**
- * The framed "stage" the tree stands on: sky, ground plane, ambient light,
- * plus the structure/health readouts that convey the same state in text
- * (SPEC §10 accessibility). The tree itself is the procedural <Tree>.
+ * The framed view of a single tree: the live 3D scene plus the structure /
+ * health readouts that convey the same state in text (SPEC §10 accessibility).
  */
 export function TreeStage({
   ticker,
@@ -29,6 +28,7 @@ export function TreeStage({
   stageLabel,
   healthLabel,
   healthUnit,
+  volatility,
   peakReturnPct,
   totalReturnPct,
   return30dPct,
@@ -44,75 +44,17 @@ export function TreeStage({
       <figure
         role="img"
         aria-label={label}
-        className="relative h-[clamp(320px,50vh,480px)] overflow-hidden rounded-2xl ring-1 ring-foreground/10"
-        style={
-          {
-            background:
-              "linear-gradient(180deg, var(--sky-top) 0%, var(--sky-bottom) 72%, var(--ground) 100%)",
-          } as CSSProperties
-        }
+        className="relative h-[clamp(340px,52vh,520px)] overflow-hidden rounded-2xl ring-1 ring-foreground/10"
       >
-        {/* morning sun */}
-        <div
-          aria-hidden
-          className="grove-glow pointer-events-none absolute -right-10 -top-10 h-56 w-56 rounded-full blur-2xl"
-          style={{
-            background:
-              "radial-gradient(circle, var(--sunlight) 0%, transparent 70%)",
-          }}
+        <Tree3D
+          className="absolute inset-0"
+          ticker={ticker}
+          structureStage={stage}
+          healthScore={healthUnit}
+          volatility={volatility}
         />
-
-        {/* ground plane */}
-        <div
-          aria-hidden
-          className="pointer-events-none absolute inset-x-0 bottom-0 h-[34%]"
-          style={{
-            background:
-              "linear-gradient(180deg, transparent 0%, color-mix(in oklch, var(--ground), transparent 30%) 45%, var(--ground) 100%)",
-          }}
-        />
-        <div
-          aria-hidden
-          className="pointer-events-none absolute inset-x-0 bottom-[34%] h-px bg-foreground/10"
-        />
-
-        {/* the tree, rooted on the ground line */}
-        <div className="absolute inset-x-0 bottom-[calc(34%-0.5rem)] flex justify-center">
-          <div
-            className="relative"
-            style={{
-              width: "clamp(240px, 46vw, 380px)",
-              height: "clamp(240px, 42vh, 380px)",
-            }}
-          >
-            {/* soft canopy light */}
-            <div
-              aria-hidden
-              className="grove-glow absolute left-1/2 top-[38%] -z-10 h-[62%] w-[78%] -translate-x-1/2 -translate-y-1/2 rounded-full blur-2xl"
-              style={{
-                background:
-                  "radial-gradient(circle, color-mix(in oklch, var(--foliage), transparent 55%) 0%, transparent 70%)",
-              }}
-            />
-
-            <Tree
-              decorative
-              ticker={ticker}
-              structureStage={stage}
-              healthScore={healthUnit}
-              className="grove-breathe h-full w-full origin-bottom"
-            />
-
-            {/* contact shadow */}
-            <div
-              aria-hidden
-              className="absolute bottom-0 left-1/2 h-3.5 w-[66%] -translate-x-1/2 translate-y-1/2 rounded-[100%] bg-foreground/25 blur-md"
-            />
-          </div>
-        </div>
-
-        <figcaption className="absolute bottom-3 left-4 right-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-          <span className="font-medium text-foreground/80">{stageLabel}</span>
+        <figcaption className="pointer-events-none absolute bottom-3 left-4 right-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-white/90 [text-shadow:0_1px_3px_rgb(0_0_0/0.55)]">
+          <span className="font-medium">{stageLabel}</span>
           <span aria-hidden>·</span>
           <span>{healthLabel} right now</span>
           <span aria-hidden>·</span>

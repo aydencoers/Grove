@@ -5,7 +5,7 @@ import { JournalFeed } from "@/components/tree/journal-feed";
 import { PositionPanel } from "@/components/tree/position-panel";
 import { TreeStage } from "@/components/tree/tree-stage";
 import { getTreeFixture } from "@/lib/tree-fixtures";
-import { healthPercentToUnit } from "@/lib/tree";
+import { healthPercentToUnit } from "@/lib/tree3d";
 
 export default async function TreePage({ params }: PageProps<"/tree/[id]">) {
   const { id } = await params;
@@ -66,6 +66,7 @@ export default async function TreePage({ params }: PageProps<"/tree/[id]">) {
               stageLabel={tree.structureStageLabel}
               healthLabel={tree.healthLabel}
               healthUnit={healthPercentToUnit(tree.healthScore)}
+              volatility={tree.volatility}
               peakReturnPct={tree.peakReturnPct}
               totalReturnPct={totalReturnPct}
               return30dPct={tree.return30dPct}

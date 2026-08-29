@@ -1,9 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 
-import { Tree } from "@/components/tree/tree";
-import { healthLabelForUnit } from "@/lib/tree";
+import { Tree3D } from "@/components/tree/tree-3d";
+import { healthLabelForUnit } from "@/lib/tree3d";
 import { cn } from "@/lib/utils";
 
 const STAGE_LABELS = [
@@ -15,31 +15,63 @@ const STAGE_LABELS = [
   "Elder tree",
 ];
 
-const STAGES = [0, 1, 2, 3, 4, 5];
-const HEALTH_SAMPLES = [-1, -0.6, -0.25, 0.1, 0.5, 1];
 const TICKERS = ["NVDA", "AAPL", "DE", "KO", "XOM", "JPM", "TSLA", "WMT"];
 
-const stageBg = {
-  background: "linear-gradient(180deg, var(--sky-top), var(--sky-bottom) 70%, var(--ground))",
-};
+function Slider({
+  id,
+  label,
+  value,
+  display,
+  min,
+  max,
+  step,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  value: number;
+  display: string;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-baseline justify-between">
+        <label
+          htmlFor={id}
+          className="text-[0.7rem] font-medium uppercase tracking-[0.08em] text-muted-foreground"
+        >
+          {label}
+        </label>
+        <span className="font-mono text-xs text-foreground/80">{display}</span>
+      </div>
+      <input
+        id={id}
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full"
+        style={{ accentColor: "var(--primary)" }}
+      />
+    </div>
+  );
+}
 
 export default function DevTreePage() {
   const [ticker, setTicker] = useState("NVDA");
-  const [stage, setStage] = useState(3);
-  const [health, setHealth] = useState(0.3);
+  const [structureStage, setStructureStage] = useState(3);
+  const [healthScore, setHealthScore] = useState(0.3);
+  const [volatility, setVolatility] = useState(0.35);
 
   const cleanTicker = ticker.trim() || "NVDA";
 
-  const bigLabel = useMemo(
-    () =>
-      `${cleanTicker} · stage ${stage} (${STAGE_LABELS[stage]}) · health ${health.toFixed(
-        2,
-      )} (${healthLabelForUnit(health)})`,
-    [cleanTicker, stage, health],
-  );
-
   return (
-    <main className="mx-auto max-w-6xl space-y-10 px-4 py-8 md:px-8 md:py-12">
+    <main className="mx-auto max-w-6xl space-y-8 px-4 py-8 md:px-8 md:py-12">
       <header className="space-y-1">
         <p className="text-[0.7rem] font-medium uppercase tracking-[0.14em] text-muted-foreground">
           Grove · dev
@@ -48,13 +80,13 @@ export default function DevTreePage() {
           Tree renderer
         </h1>
         <p className="text-sm text-muted-foreground">
-          Procedural SVG tree (SPEC §7). Shape is seeded from the ticker — same
-          ticker, same tree. Drag the sliders to walk every combination.
+          Live 3D tree — React Three Fiber + @dgreenheck/ez-tree. Seeded from the
+          ticker. Structure and volatility rebuild the mesh; health only tints
+          the leaves. Drag to orbit.
         </p>
       </header>
 
       <div className="grid gap-8 lg:grid-cols-[300px_minmax(0,1fr)]">
-        {/* controls */}
         <div className="space-y-7">
           <div className="space-y-2">
             <label
@@ -88,144 +120,57 @@ export default function DevTreePage() {
             </div>
           </div>
 
-          <div className="space-y-2">
-            <div className="flex items-baseline justify-between">
-              <label
-                htmlFor="stage"
-                className="text-[0.7rem] font-medium uppercase tracking-[0.08em] text-muted-foreground"
-              >
-                structureStage
-              </label>
-              <span className="font-mono text-xs text-foreground/80">
-                {stage} · {STAGE_LABELS[stage]}
-              </span>
-            </div>
-            <input
-              id="stage"
-              type="range"
-              min={0}
-              max={5}
-              step={1}
-              value={stage}
-              onChange={(e) => setStage(Number(e.target.value))}
-              className="w-full"
-              style={{ accentColor: "var(--primary)" }}
-            />
-          </div>
+          <Slider
+            id="structureStage"
+            label="structureStage"
+            value={structureStage}
+            display={`${structureStage} · ${STAGE_LABELS[structureStage]}`}
+            min={0}
+            max={5}
+            step={1}
+            onChange={setStructureStage}
+          />
+          <Slider
+            id="healthScore"
+            label="healthScore"
+            value={healthScore}
+            display={`${healthScore.toFixed(2)} · ${healthLabelForUnit(healthScore)}`}
+            min={-1}
+            max={1}
+            step={0.05}
+            onChange={setHealthScore}
+          />
+          <Slider
+            id="volatility"
+            label="volatility"
+            value={volatility}
+            display={volatility.toFixed(2)}
+            min={0}
+            max={1}
+            step={0.05}
+            onChange={setVolatility}
+          />
 
-          <div className="space-y-2">
-            <div className="flex items-baseline justify-between">
-              <label
-                htmlFor="health"
-                className="text-[0.7rem] font-medium uppercase tracking-[0.08em] text-muted-foreground"
-              >
-                healthScore
-              </label>
-              <span className="font-mono text-xs text-foreground/80">
-                {health.toFixed(2)} · {healthLabelForUnit(health)}
-              </span>
-            </div>
-            <input
-              id="health"
-              type="range"
-              min={-1}
-              max={1}
-              step={0.05}
-              value={health}
-              onChange={(e) => setHealth(Number(e.target.value))}
-              className="w-full"
-              style={{ accentColor: "var(--primary)" }}
-            />
-          </div>
-
-          <button
-            type="button"
-            onClick={() => {
-              setStage(Math.floor(Math.random() * 6));
-              setHealth(Math.round((Math.random() * 2 - 1) * 20) / 20);
-              setTicker(TICKERS[Math.floor(Math.random() * TICKERS.length)]);
-            }}
-            className="rounded-lg border border-border bg-card px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          >
-            Randomize
-          </button>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            <span className="font-medium text-foreground/80">
+              healthScore never regenerates the mesh.
+            </span>{" "}
+            It sets the leaf material colour and trims the canopy via drawRange.
+            structureStage and volatility (bucketed) call generate().
+          </p>
         </div>
 
-        {/* big preview */}
-        <div
-          className="flex min-h-[440px] items-end justify-center rounded-2xl p-6 ring-1 ring-foreground/10"
-          style={stageBg}
-        >
-          <Tree
-            key={`${cleanTicker}-${stage}-${health}`}
+        <div className="min-h-[520px] overflow-hidden rounded-2xl ring-1 ring-foreground/10">
+          <Tree3D
+            className="h-[clamp(420px,68vh,720px)] w-full"
             ticker={cleanTicker}
-            structureStage={stage}
-            healthScore={health}
-            aria-label={bigLabel}
-            className="h-[clamp(320px,58vh,520px)] w-full max-w-[560px]"
+            structureStage={structureStage}
+            healthScore={healthScore}
+            volatility={volatility}
+            interactive
           />
         </div>
       </div>
-
-      {/* every stage at current health */}
-      <section className="space-y-3">
-        <h2 className="text-sm font-medium">
-          Every stage{" "}
-          <span className="text-muted-foreground">
-            · healthScore {health.toFixed(2)} ({healthLabelForUnit(health)})
-          </span>
-        </h2>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-          {STAGES.map((s) => (
-            <figure
-              key={s}
-              className="space-y-1.5 rounded-xl p-3 ring-1 ring-foreground/10"
-              style={stageBg}
-            >
-              <Tree
-                decorative
-                ticker={cleanTicker}
-                structureStage={s}
-                healthScore={health}
-                className="h-36 w-full"
-              />
-              <figcaption className="text-center text-[0.7rem] text-muted-foreground">
-                {s} · {STAGE_LABELS[s]}
-              </figcaption>
-            </figure>
-          ))}
-        </div>
-      </section>
-
-      {/* current stage across health */}
-      <section className="space-y-3">
-        <h2 className="text-sm font-medium">
-          Stage {stage}{" "}
-          <span className="text-muted-foreground">
-            ({STAGE_LABELS[stage]}) · across healthScore
-          </span>
-        </h2>
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-          {HEALTH_SAMPLES.map((h) => (
-            <figure
-              key={h}
-              className="space-y-1.5 rounded-xl p-3 ring-1 ring-foreground/10"
-              style={stageBg}
-            >
-              <Tree
-                decorative
-                ticker={cleanTicker}
-                structureStage={stage}
-                healthScore={h}
-                className="h-36 w-full"
-              />
-              <figcaption className="text-center text-[0.7rem] text-muted-foreground">
-                {h.toFixed(2)} · {healthLabelForUnit(h)}
-              </figcaption>
-            </figure>
-          ))}
-        </div>
-      </section>
     </main>
   );
 }

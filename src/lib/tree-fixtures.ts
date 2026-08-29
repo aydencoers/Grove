@@ -65,6 +65,9 @@ export interface TreeFixture {
   /** Best total return seen since planting — drives structure, only grows. */
   peakReturnPct: number;
 
+  /** Elevated 20-day stdev, normalised to 0–1. Drives gnarliness + wind. */
+  volatility: number;
+
   structureStage: StructureStage;
   structureStageLabel: string;
 
@@ -98,6 +101,7 @@ const DEERE: TreeFixture = {
   return30dPct: 3.4,
 
   peakReturnPct: 26.1,
+  volatility: 0.32,
 
   structureStage: 3,
   structureStageLabel: "Young tree",
