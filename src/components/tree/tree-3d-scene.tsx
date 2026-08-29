@@ -369,12 +369,14 @@ function SceneContents({
       />
 
       <SceneErrorBoundary>
-        <EffectComposer>
+        <EffectComposer multisampling={4}>
           <DepthOfField
             target={[0, focusY, 0]}
-            focalLength={0.05}
-            bokehScale={2}
-            height={480}
+            // keep the whole tree sharp; only the far ground/background falls off
+            worldFocusRange={bounds.radius * 2.6 + bounds.height * 0.7}
+            focalLength={0.02}
+            bokehScale={1.4}
+            resolutionScale={1}
           />
         </EffectComposer>
       </SceneErrorBoundary>
@@ -386,7 +388,7 @@ export default function Tree3DScene(props: Tree3DSceneProps) {
   return (
     <Canvas
       shadows="soft"
-      dpr={[1, 1.75]}
+      dpr={[1, 2]}
       gl={{
         antialias: true,
         powerPreference: "high-performance",
