@@ -70,6 +70,7 @@ function toonMaterial(opts: {
   alphaTest?: number;
   map?: THREE.Texture | null;
   vertexColors?: boolean;
+  flatShading?: boolean;
 }): THREE.MeshToonMaterial {
   const m = new THREE.MeshToonMaterial({
     color: new THREE.Color(opts.color),
@@ -80,11 +81,28 @@ function toonMaterial(opts: {
     map: opts.map ?? null,
     vertexColors: opts.vertexColors ?? false,
   });
+  if (opts.flatShading) (m as unknown as { flatShading: boolean }).flatShading = true;
   if (opts.emissive) {
     m.emissive = new THREE.Color(opts.emissive);
     m.emissiveIntensity = opts.emissiveIntensity ?? 0.3;
   }
   return m;
+}
+
+/**
+ * Mount "grow-in": an eased scale from ~0.82 to 1 over ~0.5s. Used on a
+ * wrapper group so a stage change reads as a soft cross-fade against the dark
+ * void without touching material transparency (which fought the overlapping
+ * toon geometry).
+ */
+function useMountGrow(durationSec = 0.5) {
+  const startRef = useRef<number | null>(null);
+  return (elapsed: number) => {
+    if (startRef.current === null) startRef.current = elapsed;
+    const t = Math.min(1, (elapsed - startRef.current) / durationSec);
+    const e = 1 - Math.pow(1 - t, 3); // ease-out cubic
+    return 0.82 + 0.18 * e;
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -154,10 +172,26 @@ function Ground({ radius }: { radius: number }) {
 /* floating motes — slow upward drift around the tree                  */
 /* ------------------------------------------------------------------ */
 
+// soft round sprite so points don't render as hard squares
+const moteSprite = (() => {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const ctx = c.getContext("2d")!;
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, "rgba(255,255,255,1)");
+  g.addColorStop(0.4, "rgba(255,255,255,0.5)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  const t = new THREE.CanvasTexture(c);
+  return t;
+})();
+
 function Motes({ bounds }: { bounds: TreeBounds }) {
   const COUNT = 70;
   const spread = Math.max(8, bounds.radius * 1.5);
   const top = Math.max(10, bounds.height * 1.25);
+  const moteSize = THREE.MathUtils.clamp(bounds.height * 0.02, 0.12, 0.4);
 
   const [geometry] = useState(() => {
     const g = new THREE.BufferGeometry();
@@ -181,15 +215,19 @@ function Motes({ bounds }: { bounds: TreeBounds }) {
   const [material] = useState(
     () =>
       new THREE.PointsMaterial({
-        size: 0.38,
+        size: moteSize,
+        map: moteSprite,
         color: new THREE.Color("#d4f2ff"),
         transparent: true,
-        opacity: 1,
+        opacity: 0.9,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
         sizeAttenuation: true,
       }),
   );
+  useEffect(() => {
+    material.size = moteSize;
+  }, [material, moteSize]);
   useEffect(() => () => {
     geometry.dispose();
     material.dispose();
@@ -264,19 +302,24 @@ function extractLeafAnchors(tree: Tree, bounds: TreeBounds): LeafAnchor[] {
 /* per-skin canopy geometry                                            */
 /* ------------------------------------------------------------------ */
 
-// soft rounded blob — a smooth icosphere with a gentle lump
-function buildBlobGeometry(): THREE.BufferGeometry {
-  const g = new THREE.IcosahedronGeometry(1, 3);
+// deliberately faceted low-poly clump — strongly lumped so the silhouette is
+// irregular, not a sphere. Material renders it flat-shaded.
+function buildBlobGeometry(seed = 0xb10b): THREE.BufferGeometry {
+  const g = new THREE.IcosahedronGeometry(1, 2);
   const p = g.attributes.position;
+  const rand = mulberry32(seed);
+  // a few random low-frequency bumps
+  const bumps = Array.from({ length: 5 }, () => ({
+    dir: new THREE.Vector3(rand() - 0.5, rand() - 0.5, rand() - 0.5).normalize(),
+    amp: 0.22 + rand() * 0.4,
+    sharp: 2 + rand() * 3,
+  }));
   const v = new THREE.Vector3();
   for (let i = 0; i < p.count; i++) {
-    v.set(p.getX(i), p.getY(i), p.getZ(i));
-    const lump =
-      1 +
-      0.16 * Math.sin(v.x * 2.1 + 1) +
-      0.14 * Math.sin(v.y * 1.7 + 2) +
-      0.12 * Math.sin(v.z * 2.4);
-    p.setXYZ(i, v.x * lump, v.y * lump, v.z * lump);
+    v.set(p.getX(i), p.getY(i), p.getZ(i)).normalize();
+    let r = 1;
+    for (const b of bumps) r += b.amp * Math.pow(Math.max(0, v.dot(b.dir)), b.sharp);
+    p.setXYZ(i, v.x * r, v.y * r, v.z * r);
   }
   g.computeVertexNormals();
   return g;
@@ -365,7 +408,9 @@ const _q = new THREE.Quaternion();
 const _tmpQ = new THREE.Quaternion();
 const _s = new THREE.Vector3();
 const _p = new THREE.Vector3();
+const _radial = new THREE.Vector3();
 const _zAxis = new THREE.Vector3(0, 0, 1);
+const _yAxis = new THREE.Vector3(0, 1, 0);
 
 function SkinnedCanopy({
   tree,
@@ -400,10 +445,10 @@ function SkinnedCanopy({
       anchors[j] = t;
     }
 
-    // AGGRESSIVE reduction: a stylised canopy is a few dozen big soft forms,
-    // NOT realism-density geometry with toon shading (that reads as mush).
-    const perKind = kind === "blob" ? 0.013 : kind === "blossom" ? 0.05 : 0.03;
-    const capKind = kind === "blob" ? 42 : kind === "blossom" ? 260 : 150;
+    // Stylised low-count canopy. Money keeps more instances (notes are big and
+    // must not look detached) — its own multiplier, not the shared one.
+    const perKind = kind === "blob" ? 0.02 : kind === "blossom" ? 0.05 : 0.06;
+    const capKind = kind === "blob" ? 78 : kind === "blossom" ? 260 : 300;
     const target = Math.round(
       THREE.MathUtils.clamp(
         anchors.length * perKind * skin.leaf.densityMul * (0.5 + 0.5 * healthDensity),
@@ -419,9 +464,8 @@ function SkinnedCanopy({
       if (rand() < Math.max(0.4, edgeTrim)) kept.push(a);
     }
 
-    // form size scales with the tree so a sprout doesn't get elder-sized blobs
     const sizeFit =
-      kind === "blob" ? bounds.radius * 0.38 : bounds.radius * 0.26;
+      kind === "blob" ? bounds.radius * 0.4 : bounds.radius * 0.26;
     const s = THREE.MathUtils.clamp(sizeFit, 1.2, skin.leaf.size);
     const h = s / skin.leaf.aspect;
 
@@ -436,6 +480,7 @@ function SkinnedCanopy({
         color: skinLeafColor(skin, healthScore),
         emissive: skin.leaf.emissive,
         emissiveIntensity: 0.16,
+        flatShading: true,
       });
     } else if (kind === "blossom") {
       geo = buildBlossomGeometry();
@@ -449,8 +494,7 @@ function SkinnedCanopy({
       mat = toonMaterial({
         color: skinLeafColor(skin, healthScore),
         map: skin.texture ? skinTexture(skin.texture) : null,
-        transparent: true,
-        alphaTest: 0.45,
+        alphaTest: 0.45, // hard cutout — no blending, no sort issues
         emissive: skin.leaf.emissive,
         emissiveIntensity: 0.22,
       });
@@ -458,22 +502,65 @@ function SkinnedCanopy({
     }
     attachWindShader(mat, pivotY, span, kind === "note" ? 1 : 0.5, wind);
 
+    // money: a short stem connects each note to the branch so it hangs rather
+    // than floats
+    const stemGeo =
+      kind === "note" ? new THREE.CylinderGeometry(0.045, 0.06, 1, 5) : null;
+    const stemMat = stemGeo
+      ? toonMaterial({ color: BARK_COLOR, emissive: "#241640", emissiveIntensity: 0.4 })
+      : null;
+    const stemMatrices: THREE.Matrix4[] = [];
+
     const matrices: THREE.Matrix4[] = [];
     for (const a of kept) {
       _p.copy(a.pos);
-      _p.addScaledVector(a.up, (rand() - 0.5) * s * 0.6);
-      _p.addScaledVector(a.normal, (rand() - 0.5) * s * 0.5);
 
       if (kind === "note") {
-        _q.setFromEuler(
-          new THREE.Euler(
-            (rand() - 0.5) * 1.0,
-            rand() * Math.PI * 2,
-            (rand() - 0.5) * 0.8,
+        // attach on the branch, drop a short stem, hang the note from its top
+        _radial.set(a.pos.x, 0, a.pos.z).normalize();
+        _p.addScaledVector(a.up, (rand() - 0.5) * s * 0.5);
+        _p.addScaledVector(_radial, (rand() - 0.2) * s * 0.35);
+        const attach = _p.clone();
+        const stemLen = s * (0.22 + rand() * 0.3);
+        const pivot = attach
+          .clone()
+          .add(
+            new THREE.Vector3(
+              (rand() - 0.5) * 0.3,
+              -stemLen,
+              (rand() - 0.5) * 0.3,
+            ),
+          );
+        // stem: default cylinder is +Y, centred — put it between attach & pivot
+        const dir = pivot.clone().sub(attach);
+        const len = dir.length();
+        _q.setFromUnitVectors(_yAxis, dir.clone().normalize());
+        _s.set(1, len, 1);
+        stemMatrices.push(
+          _m.clone().compose(
+            attach.clone().lerp(pivot, 0.5),
+            _q.clone(),
+            _s.clone(),
           ),
         );
-        _s.set(0.9 + rand() * 0.5, 0.85 + rand() * 0.55, 1);
-      } else if (kind === "blossom") {
+        // note hangs from `pivot`, mostly upright, free spin, wind swings it
+        _q.setFromEuler(
+          new THREE.Euler(
+            (rand() - 0.5) * 0.28,
+            rand() * Math.PI * 2,
+            (rand() - 0.5) * 0.22,
+          ),
+        );
+        _s.set(0.9 + rand() * 0.45, 0.9 + rand() * 0.4, 1);
+        matrices.push(_m.clone().compose(pivot, _q.clone(), _s.clone()));
+        continue;
+      }
+
+      // blossom + blob share an irregular offset
+      _p.addScaledVector(a.up, (rand() - 0.5) * s * 1.3);
+      _p.addScaledVector(a.normal, (rand() - 0.5) * s * 0.9);
+
+      if (kind === "blossom") {
         const dir = a.normal
           .clone()
           .lerp(a.up, 0.25)
@@ -487,13 +574,15 @@ function SkinnedCanopy({
         _q.multiply(_tmpQ.setFromAxisAngle(_zAxis, rand() * Math.PI * 2));
         _s.setScalar(s * (0.8 + rand() * 0.5));
       } else {
-        // blob — round, softly varied; wide scale spread so the silhouette
-        // reads as a few big clusters plus smaller ones, not one solid mass
+        // blob — deliberate faceted clump. Big scale spread (~4x) + a radial
+        // shove so some poke past the crown → notched, asymmetric silhouette.
+        _radial.set(a.pos.x, 0.15, a.pos.z).normalize();
+        _p.addScaledVector(_radial, (rand() - 0.4) * s * 1.1);
         _q.setFromEuler(
           new THREE.Euler(rand() * Math.PI, rand() * Math.PI, rand() * Math.PI),
         );
-        const base = s * (0.42 + rand() * rand() * 1.1);
-        _s.set(base * (0.8 + rand() * 0.4), base * (0.8 + rand() * 0.4), base);
+        const base = s * (0.34 + rand() * rand() * 1.5);
+        _s.set(base * (0.75 + rand() * 0.5), base * (0.75 + rand() * 0.5), base);
       }
       matrices.push(_m.clone().compose(_p.clone(), _q.clone(), _s.clone()));
     }
@@ -505,7 +594,17 @@ function SkinnedCanopy({
     for (let i = 0; i < matrices.length; i++) mesh.setMatrixAt(i, matrices[i]);
     mesh.instanceMatrix.needsUpdate = true;
 
-    return { mesh, geo, mat, count: matrices.length };
+    let stems: THREE.InstancedMesh | null = null;
+    if (stemGeo && stemMat && stemMatrices.length) {
+      stems = new THREE.InstancedMesh(stemGeo, stemMat, stemMatrices.length);
+      stems.castShadow = true;
+      stems.frustumCulled = false;
+      for (let i = 0; i < stemMatrices.length; i++)
+        stems.setMatrixAt(i, stemMatrices[i]);
+      stems.instanceMatrix.needsUpdate = true;
+    }
+
+    return { mesh, stems, geo, mat, stemGeo, stemMat, count: matrices.length };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tree, gen, skin, bounds.height, bounds.radius]);
 
@@ -519,6 +618,9 @@ function SkinnedCanopy({
       built.geo.dispose();
       built.mat.dispose();
       built.mesh.dispose();
+      built.stemGeo?.dispose();
+      built.stemMat?.dispose();
+      built.stems?.dispose();
     };
   }, [built]);
 
@@ -533,7 +635,12 @@ function SkinnedCanopy({
   });
 
   if (!built) return null;
-  return <primitive object={built.mesh} />;
+  return (
+    <>
+      <primitive object={built.mesh} />
+      {built.stems && <primitive object={built.stems} />}
+    </>
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -614,6 +721,225 @@ function FallingFoliage({
 }
 
 /* ------------------------------------------------------------------ */
+/* seed + sprout — hand-authored, NOT the ez-tree generator            */
+/* ------------------------------------------------------------------ */
+
+const soilGeo = (() => {
+  const g = new THREE.IcosahedronGeometry(1, 2);
+  const p = g.attributes.position;
+  const rand = mulberry32(0x50a1);
+  for (let i = 0; i < p.count; i++) {
+    const bump = 1 + (rand() - 0.5) * 0.12;
+    p.setXYZ(i, p.getX(i) * bump, p.getY(i) * bump, p.getZ(i) * bump);
+  }
+  g.computeVertexNormals();
+  return g;
+})();
+
+// a rounded, pointed leaf blade in the XY plane, base at y≈-0.5, tip at y≈0.75
+function buildLeafGeometry(): THREE.BufferGeometry {
+  const N = 8;
+  const L: [number, number, number][] = [];
+  const R: [number, number, number][] = [];
+  for (let i = 0; i < N; i++) {
+    const f = i / (N - 1);
+    const y = -0.5 + 1.25 * f;
+    const w = 0.5 * Math.pow(Math.sin(f * Math.PI), 0.7); // 0 → wide → 0
+    const cup = -0.12 * Math.sin(f * Math.PI); // slight curl toward viewer
+    L.push([-w, y, cup]);
+    R.push([w, y, cup]);
+  }
+  const pos: number[] = [];
+  for (let i = 0; i < N - 1; i++) {
+    pos.push(...L[i], ...R[i], ...L[i + 1]);
+    pos.push(...R[i], ...R[i + 1], ...L[i + 1]);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.computeVertexNormals();
+  return g;
+}
+
+function SeedForm({
+  skin,
+  onBounds,
+}: {
+  skin: LeafSkin;
+  onBounds: (b: TreeBounds) => void;
+}) {
+  const moundR = 3.8;
+  const seedS = 1.6;
+  const mats = useMemo(
+    () => ({
+      soil: toonMaterial({
+        color: "#392b54",
+        emissive: "#180f30",
+        emissiveIntensity: 0.35,
+        flatShading: true,
+      }),
+      seed: toonMaterial({
+        color: "#caa14c",
+        emissive: skin.leaf.emissive,
+        emissiveIntensity: 0.35,
+        flatShading: true,
+      }),
+    }),
+    [skin],
+  );
+  useEffect(() => {
+    onBounds({ height: moundR * 0.6, radius: moundR });
+  }, [onBounds]);
+  useEffect(() => () => {
+    mats.soil.dispose();
+    mats.seed.dispose();
+  }, [mats]);
+
+  const grow = useMountGrow();
+  const grpRef = useRef<THREE.Group>(null);
+  useFrame((state) => {
+    const et = state.clock.elapsedTime;
+    if (grpRef.current) {
+      grpRef.current.scale.setScalar((1 + Math.sin(et * 0.7) * 0.02) * grow(et));
+    }
+  });
+
+  return (
+    <group ref={grpRef}>
+      {/* low dome poking up through the ground disc */}
+      <mesh
+        geometry={soilGeo}
+        material={mats.soil}
+        position={[0, -moundR * 0.32, 0]}
+        scale={[moundR, moundR * 0.5, moundR]}
+        receiveShadow
+        castShadow
+      />
+      {/* seed, lower half nestled into the mound, tilted */}
+      <mesh
+        geometry={soilGeo}
+        material={mats.seed}
+        position={[0.2, moundR * 0.1, 0]}
+        rotation={[0.42, 0.3, 0.66]}
+        scale={[seedS * 0.6, seedS * 0.9, seedS * 0.6]}
+        castShadow
+      />
+    </group>
+  );
+}
+
+function SproutForm({
+  skin,
+  healthScore,
+  volatility,
+  onBounds,
+}: {
+  skin: LeafSkin;
+  healthScore: number;
+  volatility: number;
+  onBounds: (b: TreeBounds) => void;
+}) {
+  const moundR = 2.8;
+  const stemH = 2.9;
+  const leafS = 2.0; // oversized for a sprout, but still 3 distinct leaves
+
+  const built = useMemo(() => {
+    const soil = toonMaterial({
+      color: "#392b54",
+      emissive: "#180f30",
+      emissiveIntensity: 0.35,
+      flatShading: true,
+    });
+    const stemGeo = new THREE.CylinderGeometry(0.07, 0.14, stemH, 7);
+    const stemMat = toonMaterial({
+      color: "#6f9a4e",
+      emissive: "#12401a",
+      emissiveIntensity: 0.4,
+      flatShading: true,
+    });
+    const leafGeo = buildLeafGeometry();
+    const leafMat = toonMaterial({
+      color: skinLeafColor(skin, healthScore),
+      emissive: skin.leaf.emissive,
+      emissiveIntensity: 0.32,
+    });
+    attachWindShader(leafMat, 0, leafS, 0.9, volatilityToWind(volatility) * 0.1);
+    // 3 distinct oversized leaves fanning up-and-out from the stem tip
+    const leaves = new THREE.InstancedMesh(leafGeo, leafMat, 3);
+    const spec = [
+      { yaw: -2.3, tilt: 0.6, y: stemH - 0.15, sc: 1.0, off: 0.55 },
+      { yaw: 0.3, tilt: 0.35, y: stemH + 0.35, sc: 1.15, off: 0.35 },
+      { yaw: 2.5, tilt: 0.7, y: stemH - 0.35, sc: 0.85, off: 0.6 },
+    ];
+    spec.forEach((sp, i) => {
+      _q.setFromEuler(new THREE.Euler(0, sp.yaw, 0));
+      _tmpQ.setFromAxisAngle(new THREE.Vector3(1, 0, 0), -sp.tilt);
+      _q.multiply(_tmpQ);
+      _s.setScalar(leafS * sp.sc);
+      leaves.setMatrixAt(
+        i,
+        _m.clone().compose(
+          new THREE.Vector3(
+            Math.cos(sp.yaw) * sp.off,
+            sp.y,
+            Math.sin(sp.yaw) * sp.off,
+          ),
+          _q.clone(),
+          _s.clone(),
+        ),
+      );
+    });
+    leaves.instanceMatrix.needsUpdate = true;
+    leaves.castShadow = true;
+    return { soil, stemGeo, stemMat, leafGeo, leafMat, leaves };
+  }, [skin, healthScore, volatility]);
+
+  useEffect(() => {
+    onBounds({ height: stemH + leafS, radius: Math.max(moundR, leafS * 1.4) });
+  }, [onBounds]);
+  useEffect(() => () => {
+    built.soil.dispose();
+    built.stemGeo.dispose();
+    built.stemMat.dispose();
+    built.leafGeo.dispose();
+    built.leafMat.dispose();
+    built.leaves.dispose();
+  }, [built]);
+
+  const grow = useMountGrow();
+  const grpRef = useRef<THREE.Group>(null);
+  useFrame((state) => {
+    const et = state.clock.elapsedTime;
+    const sh = built.leafMat.userData?.windShader as
+      | { uniforms: Record<string, { value: number }> }
+      | undefined;
+    if (sh) sh.uniforms.uTime.value = et;
+    if (grpRef.current) {
+      grpRef.current.scale.setScalar((1 + Math.sin(et * 0.8) * 0.02) * grow(et));
+    }
+  });
+
+  return (
+    <group ref={grpRef}>
+      <mesh
+        geometry={soilGeo}
+        material={built.soil}
+        position={[0, -moundR * 0.3, 0]}
+        scale={[moundR, moundR * 0.42, moundR]}
+        receiveShadow
+        castShadow
+      />
+      <mesh
+        geometry={built.stemGeo}
+        material={built.stemMat}
+        position={[0, stemH / 2 - 0.3, 0]}
+        castShadow
+      />
+      <primitive object={built.leaves} />
+    </group>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /* the ez-tree instance                                                */
 /* ------------------------------------------------------------------ */
 
@@ -686,12 +1012,15 @@ function EzTreeObject({
     };
   }, [tree]);
 
-  // slow breathing scale on the whole tree — ~7s cycle
+  // slow breathing scale on the whole tree — ~7s cycle; plus a mount grow-in
+  const grow = useMountGrow();
   useFrame((state) => {
-    tree.update(state.clock.elapsedTime);
+    const et = state.clock.elapsedTime;
+    tree.update(et);
     if (breatheRef.current) {
-      const s = 1 + Math.sin(state.clock.elapsedTime * 0.85) * 0.018;
-      breatheRef.current.scale.setScalar(s);
+      breatheRef.current.scale.setScalar(
+        (1 + Math.sin(et * 0.85) * 0.018) * grow(et),
+      );
     }
   });
 
@@ -724,14 +1053,19 @@ function EzTreeObject({
 /* ------------------------------------------------------------------ */
 
 function frameCamera(bounds: TreeBounds) {
-  const focusY = bounds.height * 0.54;
-  // the stylised canopy overshoots ez-tree's leaf bounds by a blob radius, so
-  // pull back further than the naturalistic framing did
-  const dist =
-    Math.max(bounds.height * 1.55, bounds.radius * 3.6) + bounds.height * 0.15 + 6;
+  const small = bounds.height < 8; // seed / sprout
+  const focusY = bounds.height * (small ? 0.3 : 0.54);
+  const dist = small
+    ? Math.max(bounds.height * 2.6, bounds.radius * 2.7, 6.5)
+    : // the stylised canopy overshoots ez-tree's leaf bounds by a blob radius
+      Math.max(bounds.height * 1.55, bounds.radius * 3.6) + bounds.height * 0.15 + 6;
   return {
     focusY,
-    position: [dist * 0.48, focusY + bounds.height * 0.26, dist] as const,
+    position: [
+      dist * 0.48,
+      focusY + bounds.height * (small ? 0.5 : 0.26),
+      dist,
+    ] as const,
   };
 }
 
@@ -790,6 +1124,33 @@ class SceneErrorBoundary extends Component<
 /* scene — dark void, warm key + cool fill + bright rim, bloom         */
 /* ------------------------------------------------------------------ */
 
+/* stage 0/1 are hand-authored; the ez-tree generator only runs from stage 2. */
+function StageContent(
+  props: Omit<Tree3DSceneProps, "interactive"> & {
+    onBounds: (b: TreeBounds) => void;
+  },
+) {
+  const stage = Math.max(0, Math.min(5, Math.round(props.structureStage)));
+  const skin = getSkin(props.skin);
+
+  if (stage === 0) {
+    return <SeedForm skin={skin} onBounds={props.onBounds} />;
+  }
+  if (stage === 1) {
+    return (
+      <SproutForm
+        skin={skin}
+        healthScore={props.healthScore}
+        volatility={props.volatility}
+        onBounds={props.onBounds}
+      />
+    );
+  }
+  // key on the seed/tree boundary so the tree remounts (and fades in) when
+  // crossing up from the sprout — reads as a cross-fade against the dark void
+  return <EzTreeObject key="tree" {...props} />;
+}
+
 function SceneContents({
   ticker,
   structureStage,
@@ -846,7 +1207,7 @@ function SceneContents({
       <Ground radius={Math.max(40, bounds.radius * 4)} />
 
       <SceneErrorBoundary>
-        <EzTreeObject
+        <StageContent
           ticker={ticker}
           structureStage={structureStage}
           healthScore={healthScore}

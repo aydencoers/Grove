@@ -63,7 +63,7 @@ export const LEAF_SKINS: Record<SkinId, LeafSkin> = {
       size: 5.5,
       aspect: 1,
       densityMul: 1,
-      branchBias: 0.35,
+      branchBias: 0.08, // real foliage sits out at the branch tips
       windAmp: 0.6,
       emissive: "#0e6b50",
     },
@@ -92,10 +92,10 @@ export const LEAF_SKINS: Record<SkinId, LeafSkin> = {
     texture: "/textures/leaves/money.png",
     leaf: {
       kind: "note",
-      size: 3.4,
+      size: 3.2,
       aspect: 2.4,
-      densityMul: 0.7,
-      branchBias: 0.2,
+      densityMul: 1.6, // notes are big — needs more of them to not read as sparse
+      branchBias: 0.15,
       windAmp: 1.1,
       emissive: "#0e5a3a",
     },
