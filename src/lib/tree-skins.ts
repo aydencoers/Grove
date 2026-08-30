@@ -1,71 +1,55 @@
 /*
- * Leaf skins. Adding a new skin (e.g. autumn) is one entry in LEAF_SKINS —
- * no new branches anywhere.
+ * Leaf skins — stylised (toon) art direction. Adding a new skin (e.g. autumn)
+ * is one entry in LEAF_SKINS, no new branches anywhere.
  *
- * A skin is NOT just a texture. Each skin declares its own leaf GEOMETRY,
- * PLACEMENT and ROTATION (the `leaf` block below):
- *   - "sprite"  — ez-tree's own billboard leaves, unchanged. We only tint the
- *     material + trim drawRange. No regenerate. (this is "default")
- *   - "blossom" / "note" — ez-tree's leaf mesh is hidden and replaced by our own
- *     InstancedMesh, placed from the tree's leaf-anchor points. See
- *     <SkinnedLeaves> in tree-3d-scene.tsx.
+ * Each skin declares its own canopy GEOMETRY, size, placement and rotation
+ * (the `leaf` block). The renderer replaces ez-tree's dense billboard leaves
+ * with a low-count InstancedMesh of large soft toon forms:
+ *   - "blob"    — rounded icosphere clusters (default green)
+ *   - "blossom" — 5-petal geometry
+ *   - "note"    — flat banknote quad, alpha-cut, gently curled
  *
- * `leafSizeMul` still feeds ez-tree's options.leaves.size (sprite only) and so
- * costs one regenerate on change; everything else about a skin is applied live.
- *
- * SPEC §3 conflict, resolved: the "earnings beat → blossoms for 3 days" event
- * is meaningless on a cherry-skinned tree (already all blossom). When events
- * ship (Phase 6): for skin === "cherry" the earnings-beat effect should be a
- * brief sunlit-shimmer / bird instead of blossoms — do NOT stack a blossom
- * overlay. For other skins, a 3-day temporary cherry-blossom overlay is fine.
+ * Colour is a flat MeshToonMaterial colour from the health ramp. In the
+ * stylised look the ramps are SATURATED and LUMINOUS, not naturalistic:
+ * greens push toward teal, pinks stay hot, against the near-black void.
  */
 
 export type SkinId = "default" | "cherry" | "money";
-export type LeafKind = "sprite" | "blossom" | "note";
+export type LeafKind = "blob" | "blossom" | "note";
+
+/** global stylised palette */
+export const BARK_COLOR = "#5b4682"; // luminous violet-brown
+export const GROUND_COLOR = "#2a1e46"; // dark violet terrain
 
 export interface LeafGeometry {
   kind: LeafKind;
-  /** long dimension, world units. */
+  /** long dimension of one canopy form, world units — BIG in the stylised look. */
   size: number;
   /** width : height. 1 = round, 2.4 = banknote. */
   aspect: number;
-  /** instance count vs. ez-tree's leaf-anchor count. */
+  /** instance-count multiplier (canopy stays sparse — a few dozen forms). */
   densityMul: number;
-  placement: "even" | "clustered";
-  /** clustered only: [min, max] instances per clump. */
-  clusterSize: [number, number];
   /** 0 = out at the branch tips, 1 = tight on the inner/middle branch. */
   branchBias: number;
-  /** "leaf" = follow the branch; "hang" = dangle from the attach point, spin freely. */
-  rotation: "leaf" | "hang";
-  /** "leaf" = translucent standard; "paper" = matte, rough, fibre normal map. */
-  material: "leaf" | "paper";
   /** wind response, multiplies the tree's volatility-driven wind. */
   windAmp: number;
+  /** self-glow colour so shadowed toon bands still read against the void. */
+  emissive: string;
 }
 
 export interface LeafSkin {
   id: SkinId;
   label: string;
-  /**
-   * public/ URL of the 1024² alpha-cutout PNG. Used by the "sprite" and (as a
-   * fallback tint reference) particle systems. `null` = ez-tree's native leaf
-   * texture. Ignored by "blossom" (pure geometry).
-   */
+  /** alpha-cut PNG for the "note" kind; null otherwise (pure geometry). */
   texture: string | null;
-  /** multiplier on ez-tree's leaf size — GEOMETRY (sprite only; one rebuild). */
-  leafSizeMul: number;
-  /** health-driven canopy density multiplier — MATERIAL drawRange (sprite only). */
-  densityMul: number;
-  /** per-skin geometry / placement / rotation. */
   leaf: LeafGeometry;
   /**
-   * three-stop health ramp, multiplied onto material.color — MATERIAL. Keep it
-   * SUBTLE: "thriving" should be ~white so the texture/geometry colour reads at
-   * full richness; only shift + darken as health drops.
+   * three-stop health ramp → flat MeshToonMaterial colour.
+   * "thriving" is the vivid luminous colour; it desaturates + dims as health
+   * drops.
    */
   ramp: { thriving: string; stressed: string; dying: string };
-  /** tint for the falling / ground scatter on a down day. */
+  /** colour for the falling motes on a down day. */
   particleTint: string;
 }
 
@@ -73,69 +57,50 @@ export const LEAF_SKINS: Record<SkinId, LeafSkin> = {
   default: {
     id: "default",
     label: "Green",
-    texture: null, // ez-tree's native oak leaf texture, untouched
-    leafSizeMul: 1,
-    densityMul: 1,
+    texture: null,
     leaf: {
-      kind: "sprite",
-      size: 2.3,
+      kind: "blob",
+      size: 5.5,
       aspect: 1,
       densityMul: 1,
-      placement: "even",
-      clusterSize: [1, 1],
-      branchBias: 0,
-      rotation: "leaf",
-      material: "leaf",
-      windAmp: 1,
+      branchBias: 0.35,
+      windAmp: 0.6,
+      emissive: "#0e6b50",
     },
-    ramp: { thriving: "#fbfaf3", stressed: "#d7d0a6", dying: "#7a5f3c" },
-    particleTint: "#9db566",
+    ramp: { thriving: "#1fbf92", stressed: "#6faa55", dying: "#54542f" },
+    particleTint: "#5ff0c0",
   },
   cherry: {
     id: "cherry",
     label: "Cherry blossom",
-    texture: "/textures/leaves/cherry.png",
-    leafSizeMul: 0.95,
-    densityMul: 1.1,
+    texture: null,
     leaf: {
-      // real 5-petal blossom geometry, tight clumps hugging the inner branch,
-      // denser than green, with bare wood showing through at the tips
       kind: "blossom",
-      size: 1.7,
+      size: 2.6,
       aspect: 1,
-      densityMul: 1.2,
-      placement: "clustered",
-      clusterSize: [3, 6],
-      branchBias: 0.55,
-      rotation: "leaf",
-      material: "leaf",
-      windAmp: 0.55,
+      densityMul: 1.15,
+      branchBias: 0.5,
+      windAmp: 0.5,
+      emissive: "#a01e6a",
     },
-    ramp: { thriving: "#fbe6ee", stressed: "#e7cdd6", dying: "#8f7168" },
-    particleTint: "#f2b6cd",
+    ramp: { thriving: "#ff8fd6", stressed: "#f0b9d6", dying: "#8f6f88" },
+    particleTint: "#ff9ede",
   },
   money: {
     id: "money",
     label: "Money",
     texture: "/textures/leaves/money.png",
-    leafSizeMul: 1.1,
-    densityMul: 0.82,
     leaf: {
-      // rigid 2.4:1 banknotes, hanging from the attach point, spun to varied
-      // angles (some edge-on), sparser than green, matte paper
       kind: "note",
-      size: 2.8,
+      size: 3.4,
       aspect: 2.4,
-      densityMul: 1,
-      placement: "even",
-      clusterSize: [1, 1],
+      densityMul: 0.7,
       branchBias: 0.2,
-      rotation: "hang",
-      material: "paper",
-      windAmp: 1.15,
+      windAmp: 1.1,
+      emissive: "#0e5a3a",
     },
-    ramp: { thriving: "#f2f4ea", stressed: "#cdccb8", dying: "#8f8f88" },
-    particleTint: "#9bb886",
+    ramp: { thriving: "#7fe6a0", stressed: "#bcd6b0", dying: "#8f8f88" },
+    particleTint: "#8fe6a8",
   },
 };
 
@@ -159,9 +124,7 @@ function toRgb(hex: string): [number, number, number] {
 }
 
 /**
- * healthScore (-1..1) → hex along the skin's own ramp, multiplied onto the leaf
- * material. Breakpoints lean toward "thriving" so a healthy tree (score ~0.3)
- * sits at ~full texture richness rather than a heavy tint:
+ * healthScore (-1..1) → hex along the skin's own ramp.
  *   dying by ≈ -0.55 · stressed at ≈ -0.15 · thriving by ≈ +0.2
  */
 export function skinLeafColor(skin: LeafSkin, healthScore: number): string {
