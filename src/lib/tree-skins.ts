@@ -60,10 +60,10 @@ export const LEAF_SKINS: Record<SkinId, LeafSkin> = {
     texture: null,
     leaf: {
       kind: "blob",
-      size: 5.5,
+      size: 2, // small clumps — the branch structure must read through
       aspect: 1,
       densityMul: 1,
-      branchBias: 0.08, // real foliage sits out at the branch tips
+      branchBias: 0.05, // foliage sits out at the branch tips
       windAmp: 0.6,
       emissive: "#0e6b50",
     },
@@ -92,9 +92,9 @@ export const LEAF_SKINS: Record<SkinId, LeafSkin> = {
     texture: "/textures/leaves/money.png",
     leaf: {
       kind: "note",
-      size: 3.2,
+      size: 4.5, // +40% — bills must read as banknotes
       aspect: 2.4,
-      densityMul: 1.6, // notes are big — needs more of them to not read as sparse
+      densityMul: 1.8,
       branchBias: 0.15,
       windAmp: 1.1,
       emissive: "#0e5a3a",

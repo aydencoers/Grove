@@ -305,7 +305,7 @@ function extractLeafAnchors(tree: Tree, bounds: TreeBounds): LeafAnchor[] {
 // deliberately faceted low-poly clump — strongly lumped so the silhouette is
 // irregular, not a sphere. Material renders it flat-shaded.
 function buildBlobGeometry(seed = 0xb10b): THREE.BufferGeometry {
-  const g = new THREE.IcosahedronGeometry(1, 2);
+  const g = new THREE.IcosahedronGeometry(1, 3);
   const p = g.attributes.position;
   const rand = mulberry32(seed);
   // a few random low-frequency bumps
@@ -359,13 +359,19 @@ function buildBlossomGeometry(): THREE.BufferGeometry {
   return geo;
 }
 
+// a SINGLE plane (no thickness) that hangs from its top edge, with a gentle
+// two-axis curl so it reads as paper rather than a slab
 function buildNoteGeometry(w: number, h: number): THREE.BufferGeometry {
-  const g = new THREE.PlaneGeometry(w, h, 8, 2);
-  g.translate(0, -h / 2, 0);
+  const g = new THREE.PlaneGeometry(w, h, 10, 4);
+  g.translate(0, -h / 2, 0); // top edge at the origin → hangs from there
   const p = g.attributes.position;
   for (let i = 0; i < p.count; i++) {
-    const u = p.getX(i) / w;
-    p.setZ(i, Math.sin(u * Math.PI) * w * 0.06);
+    const u = p.getX(i) / w; // -0.5..0.5
+    const v = p.getY(i) / h; // 0..-1 (top..bottom)
+    p.setZ(
+      i,
+      Math.sin(u * Math.PI) * w * 0.11 + Math.sin(v * Math.PI * 1.4) * h * 0.06,
+    );
   }
   g.computeVertexNormals();
   return g;
@@ -410,7 +416,6 @@ const _s = new THREE.Vector3();
 const _p = new THREE.Vector3();
 const _radial = new THREE.Vector3();
 const _zAxis = new THREE.Vector3(0, 0, 1);
-const _yAxis = new THREE.Vector3(0, 1, 0);
 
 function SkinnedCanopy({
   tree,
@@ -447,8 +452,8 @@ function SkinnedCanopy({
 
     // Stylised low-count canopy. Money keeps more instances (notes are big and
     // must not look detached) — its own multiplier, not the shared one.
-    const perKind = kind === "blob" ? 0.02 : kind === "blossom" ? 0.05 : 0.06;
-    const capKind = kind === "blob" ? 78 : kind === "blossom" ? 260 : 300;
+    const perKind = kind === "blob" ? 0.07 : kind === "blossom" ? 0.05 : 0.17;
+    const capKind = kind === "blob" ? 320 : kind === "blossom" ? 260 : 580;
     const target = Math.round(
       THREE.MathUtils.clamp(
         anchors.length * perKind * skin.leaf.densityMul * (0.5 + 0.5 * healthDensity),
@@ -465,8 +470,12 @@ function SkinnedCanopy({
     }
 
     const sizeFit =
-      kind === "blob" ? bounds.radius * 0.4 : bounds.radius * 0.26;
-    const s = THREE.MathUtils.clamp(sizeFit, 1.2, skin.leaf.size);
+      kind === "blob" ? bounds.radius * 0.14 : bounds.radius * 0.36;
+    const s = THREE.MathUtils.clamp(
+      sizeFit,
+      kind === "blob" ? 0.5 : 1.2,
+      skin.leaf.size,
+    );
     const h = s / skin.leaf.aspect;
 
     let geo: THREE.BufferGeometry;
@@ -476,8 +485,10 @@ function SkinnedCanopy({
 
     if (kind === "blob") {
       geo = buildBlobGeometry();
+      // white base — per-instance colour (below) carries the hue/lightness so
+      // the clumps don't read as one solid mass
       mat = toonMaterial({
-        color: skinLeafColor(skin, healthScore),
+        color: "#ffffff",
         emissive: skin.leaf.emissive,
         emissiveIntensity: 0.16,
         flatShading: true,
@@ -502,10 +513,9 @@ function SkinnedCanopy({
     }
     attachWindShader(mat, pivotY, span, kind === "note" ? 1 : 0.5, wind);
 
-    // money: a short stem connects each note to the branch so it hangs rather
-    // than floats
+    // money: a near-invisible stub connects each note to the branch
     const stemGeo =
-      kind === "note" ? new THREE.CylinderGeometry(0.045, 0.06, 1, 5) : null;
+      kind === "note" ? new THREE.CylinderGeometry(0.03, 0.045, 1, 4) : null;
     const stemMat = stemGeo
       ? toonMaterial({ color: BARK_COLOR, emissive: "#241640", emissiveIntensity: 0.4 })
       : null;
@@ -516,42 +526,31 @@ function SkinnedCanopy({
       _p.copy(a.pos);
 
       if (kind === "note") {
-        // attach on the branch, drop a short stem, hang the note from its top
+        // attach on the branch; near-zero stub; note hangs from its top edge
         _radial.set(a.pos.x, 0, a.pos.z).normalize();
-        _p.addScaledVector(a.up, (rand() - 0.5) * s * 0.5);
-        _p.addScaledVector(_radial, (rand() - 0.2) * s * 0.35);
+        _p.addScaledVector(a.up, (rand() - 0.5) * s * 0.45);
+        _p.addScaledVector(_radial, (rand() - 0.15) * s * 0.3);
         const attach = _p.clone();
-        const stemLen = s * (0.22 + rand() * 0.3);
+        const stemLen = s * (0.03 + rand() * 0.05);
         const pivot = attach
           .clone()
-          .add(
-            new THREE.Vector3(
-              (rand() - 0.5) * 0.3,
-              -stemLen,
-              (rand() - 0.5) * 0.3,
-            ),
-          );
-        // stem: default cylinder is +Y, centred — put it between attach & pivot
-        const dir = pivot.clone().sub(attach);
-        const len = dir.length();
-        _q.setFromUnitVectors(_yAxis, dir.clone().normalize());
+          .add(new THREE.Vector3(0, -stemLen, 0));
+        const len = Math.max(0.01, pivot.clone().sub(attach).length());
+        _q.identity(); // stub is vertical
         _s.set(1, len, 1);
         stemMatrices.push(
-          _m.clone().compose(
-            attach.clone().lerp(pivot, 0.5),
-            _q.clone(),
-            _s.clone(),
-          ),
+          _m.clone().compose(attach.clone().lerp(pivot, 0.5), _q.clone(), _s.clone()),
         );
-        // note hangs from `pivot`, mostly upright, free spin, wind swings it
+        // full-360 yaw + ±40° pitch & roll → no two hang alike, some edge-on;
+        // wind swings each from its top-edge pivot (pivotY = 0)
         _q.setFromEuler(
           new THREE.Euler(
-            (rand() - 0.5) * 0.28,
+            (rand() - 0.5) * 1.4,
             rand() * Math.PI * 2,
-            (rand() - 0.5) * 0.22,
+            (rand() - 0.5) * 1.4,
           ),
         );
-        _s.set(0.9 + rand() * 0.45, 0.9 + rand() * 0.4, 1);
+        _s.set(0.85 + rand() * 0.55, 0.85 + rand() * 0.5, 1);
         matrices.push(_m.clone().compose(pivot, _q.clone(), _s.clone()));
         continue;
       }
@@ -574,15 +573,16 @@ function SkinnedCanopy({
         _q.multiply(_tmpQ.setFromAxisAngle(_zAxis, rand() * Math.PI * 2));
         _s.setScalar(s * (0.8 + rand() * 0.5));
       } else {
-        // blob — deliberate faceted clump. Big scale spread (~4x) + a radial
-        // shove so some poke past the crown → notched, asymmetric silhouette.
+        // blob — small faceted clump that lets the branches read through.
+        // 2–3x scale spread + a radial shove so some poke past the crown →
+        // notched, asymmetric silhouette.
         _radial.set(a.pos.x, 0.15, a.pos.z).normalize();
-        _p.addScaledVector(_radial, (rand() - 0.4) * s * 1.1);
+        _p.addScaledVector(_radial, (rand() - 0.45) * s * 1.0);
         _q.setFromEuler(
           new THREE.Euler(rand() * Math.PI, rand() * Math.PI, rand() * Math.PI),
         );
-        const base = s * (0.34 + rand() * rand() * 1.5);
-        _s.set(base * (0.75 + rand() * 0.5), base * (0.75 + rand() * 0.5), base);
+        const base = s * (0.55 + rand() * 1.25);
+        _s.set(base * (0.82 + rand() * 0.36), base * (0.82 + rand() * 0.36), base);
       }
       matrices.push(_m.clone().compose(_p.clone(), _q.clone(), _s.clone()));
     }
@@ -594,6 +594,25 @@ function SkinnedCanopy({
     for (let i = 0; i < matrices.length; i++) mesh.setMatrixAt(i, matrices[i]);
     mesh.instanceMatrix.needsUpdate = true;
 
+    // per-instance hue/lightness jitter for blobs
+    let hueJit: Float32Array | null = null;
+    if (kind === "blob") {
+      hueJit = new Float32Array(matrices.length * 3);
+      const jr = mulberry32(hashToSeed(`${skin.id}:${gen}:hue`));
+      const c = new THREE.Color();
+      for (let i = 0; i < matrices.length; i++) {
+        const dh = (jr() - 0.5) * 0.05;
+        const ds = (jr() - 0.5) * 0.16;
+        const dl = (jr() - 0.5) * 0.18;
+        hueJit[i * 3] = dh;
+        hueJit[i * 3 + 1] = ds;
+        hueJit[i * 3 + 2] = dl;
+        c.set(skinLeafColor(skin, healthScore)).offsetHSL(dh, ds, dl);
+        mesh.setColorAt(i, c);
+      }
+      if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    }
+
     let stems: THREE.InstancedMesh | null = null;
     if (stemGeo && stemMat && stemMatrices.length) {
       stems = new THREE.InstancedMesh(stemGeo, stemMat, stemMatrices.length);
@@ -604,12 +623,38 @@ function SkinnedCanopy({
       stems.instanceMatrix.needsUpdate = true;
     }
 
-    return { mesh, stems, geo, mat, stemGeo, stemMat, count: matrices.length };
+    return {
+      mesh,
+      stems,
+      geo,
+      mat,
+      stemGeo,
+      stemMat,
+      hueJit,
+      count: matrices.length,
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tree, gen, skin, bounds.height, bounds.radius]);
 
+  // health tint — MATERIAL only, no regenerate. Blobs re-tint per-instance so
+  // the hue variation survives.
   useEffect(() => {
-    if (built) built.mat.color.set(skinLeafColor(skin, healthScore));
+    if (!built) return;
+    if (built.hueJit) {
+      const hex = skinLeafColor(skin, healthScore);
+      const c = new THREE.Color();
+      for (let i = 0; i < built.count; i++) {
+        c.set(hex).offsetHSL(
+          built.hueJit[i * 3],
+          built.hueJit[i * 3 + 1],
+          built.hueJit[i * 3 + 2],
+        );
+        built.mesh.setColorAt(i, c);
+      }
+      if (built.mesh.instanceColor) built.mesh.instanceColor.needsUpdate = true;
+    } else {
+      built.mat.color.set(skinLeafColor(skin, healthScore));
+    }
   }, [built, skin, healthScore]);
 
   useEffect(() => {
@@ -1057,8 +1102,7 @@ function frameCamera(bounds: TreeBounds) {
   const focusY = bounds.height * (small ? 0.3 : 0.54);
   const dist = small
     ? Math.max(bounds.height * 2.6, bounds.radius * 2.7, 6.5)
-    : // the stylised canopy overshoots ez-tree's leaf bounds by a blob radius
-      Math.max(bounds.height * 1.55, bounds.radius * 3.6) + bounds.height * 0.15 + 6;
+    : Math.max(bounds.height * 2.0, bounds.radius * 4.4) + bounds.height * 0.2 + 8;
   return {
     focusY,
     position: [

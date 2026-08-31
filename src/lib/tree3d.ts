@@ -83,12 +83,12 @@ interface StageGeom {
 // One row per structureStage. leafCount is the MAX for the stage; healthScore
 // thins it at render time via geometry.drawRange, never by regenerating.
 const STAGE_GEOM: StageGeom[] = [
-  { levels: 0, len: 2.4, radius: 0.2, children: [0, 0, 0], leafCount: 4, leafSize: 1.1, leafStart: 0 },
-  { levels: 1, len: 8, radius: 0.3, children: [3, 0, 0], leafCount: 7, leafSize: 1.5, leafStart: 0.08 },
-  { levels: 2, len: 15, radius: 0.62, children: [5, 4, 0], leafCount: 13, leafSize: 2.0, leafStart: 0.22 },
-  { levels: 3, len: 23, radius: 1.15, children: [6, 5, 4], leafCount: 20, leafSize: 2.3, leafStart: 0.18 },
-  { levels: 3, len: 31, radius: 1.7, children: [7, 5, 4], leafCount: 26, leafSize: 2.5, leafStart: 0.15 },
-  { levels: 3, len: 39, radius: 2.5, children: [7, 6, 5], leafCount: 32, leafSize: 2.7, leafStart: 0.13 },
+  { levels: 0, len: 2.4, radius: 0.24, children: [0, 0, 0], leafCount: 4, leafSize: 1.1, leafStart: 0 },
+  { levels: 1, len: 8.5, radius: 0.38, children: [3, 0, 0], leafCount: 7, leafSize: 1.5, leafStart: 0.08 },
+  { levels: 2, len: 16, radius: 0.8, children: [5, 4, 0], leafCount: 13, leafSize: 2.0, leafStart: 0.22 },
+  { levels: 3, len: 25, radius: 1.5, children: [6, 5, 4], leafCount: 20, leafSize: 2.3, leafStart: 0.18 },
+  { levels: 3, len: 34, radius: 2.2, children: [7, 5, 4], leafCount: 26, leafSize: 2.5, leafStart: 0.15 },
+  { levels: 3, len: 43, radius: 3.2, children: [7, 6, 5], leafCount: 32, leafSize: 2.7, leafStart: 0.13 },
 ];
 
 export function stageIndex(structureStage: number): number {
