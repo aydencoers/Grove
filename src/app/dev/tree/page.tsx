@@ -70,6 +70,7 @@ export default function DevTreePage() {
   const [volatility, setVolatility] = useState(0.35);
   const [skin, setSkin] = useState<SkinId>("default");
   const [shedding, setShedding] = useState(false);
+  const [view, setView] = useState<"single" | "all">("single");
 
   const cleanTicker = ticker.trim() || "NVDA";
 
@@ -118,6 +119,29 @@ export default function DevTreePage() {
                   )}
                 >
                   {t}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <span className="text-[0.7rem] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+              View
+            </span>
+            <div className="flex gap-1.5">
+              {(["single", "all"] as const).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => setView(v)}
+                  className={cn(
+                    "rounded-md border px-2.5 py-1 text-xs transition-colors",
+                    v === view
+                      ? "border-primary bg-primary text-primary-foreground"
+                      : "border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )}
+                >
+                  {v === "single" ? "Single" : "All stages"}
                 </button>
               ))}
             </div>
@@ -202,18 +226,42 @@ export default function DevTreePage() {
           </p>
         </div>
 
-        <div className="min-h-[520px] overflow-hidden rounded-2xl ring-1 ring-foreground/10">
-          <Tree3D
-            className="h-[clamp(420px,68vh,720px)] w-full"
-            ticker={cleanTicker}
-            structureStage={structureStage}
-            healthScore={healthScore}
-            volatility={volatility}
-            skin={skin}
-            shedding={shedding}
-            interactive
-          />
-        </div>
+        {view === "single" ? (
+          <div className="min-h-[520px] overflow-hidden rounded-2xl ring-1 ring-foreground/10">
+            <Tree3D
+              className="h-[clamp(420px,68vh,720px)] w-full"
+              ticker={cleanTicker}
+              structureStage={structureStage}
+              healthScore={healthScore}
+              volatility={volatility}
+              skin={skin}
+              shedding={shedding}
+              interactive
+            />
+          </div>
+        ) : (
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {STAGE_LABELS.map((label, stage) => (
+              <figure
+                key={stage}
+                className="overflow-hidden rounded-xl ring-1 ring-foreground/10"
+              >
+                <Tree3D
+                  className="h-[clamp(220px,32vh,320px)] w-full"
+                  ticker={cleanTicker}
+                  structureStage={stage}
+                  healthScore={healthScore}
+                  volatility={volatility}
+                  skin={skin}
+                  shedding={shedding}
+                />
+                <figcaption className="bg-card px-2.5 py-1.5 text-[0.7rem] text-muted-foreground">
+                  {stage} · {label}
+                </figcaption>
+              </figure>
+            ))}
+          </div>
+        )}
       </div>
     </main>
   );
