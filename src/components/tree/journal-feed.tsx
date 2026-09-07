@@ -16,11 +16,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import type {
-  JournalEntry,
-  JournalTrigger,
-  TreeFixture,
-} from "@/lib/tree-fixtures";
+import type { JournalEntry, JournalTrigger } from "@/lib/positions";
 import { formatDate, formatSignedPct } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -107,22 +103,23 @@ function Entry({ entry, isLast }: { entry: JournalEntry; isLast: boolean }) {
   );
 }
 
-export function JournalFeed({ tree }: { tree: TreeFixture }) {
+export function JournalFeed({ journal }: { journal: JournalEntry[] }) {
   return (
     <Card>
       <CardHeader>
         <CardTitle>Journal</CardTitle>
         <CardDescription>
-          What moved this tree, in plain language — {tree.journal.length} entries.
+          What moved this tree, in plain language — {journal.length}{" "}
+          {journal.length === 1 ? "entry" : "entries"}.
         </CardDescription>
       </CardHeader>
       <CardContent>
         <ol>
-          {tree.journal.map((entry, i) => (
+          {journal.map((entry, i) => (
             <Entry
               key={entry.id}
               entry={entry}
-              isLast={i === tree.journal.length - 1}
+              isLast={i === journal.length - 1}
             />
           ))}
         </ol>

@@ -1,12 +1,12 @@
 /*
- * Procedurally generate the alpha-mapped leaf billboards for Grove's leaf
- * skins. Matches ez-tree's own leaf textures: 1024x1024 PNG with alpha
- * (node_modules/@dgreenheck/ez-tree/src/lib/assets/leaves/*.png are 1024x1024,
- * 8-bit, transparent). Ours are RGBA8 instead of palette+tRNS — loads the same.
+ * Procedurally generate the alpha-mapped textures for Grove's leaf skins.
  *
- * Base colours are kept saturated so the per-skin health ramp (multiplied onto
- * material.color at runtime) has room to shift + darken toward "stressed" and
- * "dying" without a regenerate.
+ *   cherry.png — 1024x1024, a blossom spray (billboard leaf, matches ez-tree's
+ *                own 1024x1024 leaf PNGs). Used by the cherry skin; the gold
+ *                skin shares the runtime blossom geometry, no texture.
+ *
+ * Base colours stay saturated so the runtime health ramp (multiplied onto
+ * material.color) has room to shift toward "stressed" / "dying".
  *
  *   node scripts/gen-leaf-textures.mjs
  */
@@ -15,21 +15,24 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const S = 1024;
 const OUT = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../public/textures/leaves",
 );
 
+/* the raster size for the texture currently being drawn */
+let W = 1024;
+let H = 1024;
+
 /* ---------- tiny software rasteriser (straight-alpha `over`) ---------- */
 
 function canvas() {
-  return new Float32Array(S * S * 4); // r,g,b,a in 0..1
+  return new Float32Array(W * H * 4); // r,g,b,a in 0..1
 }
 
 function blend(img, x, y, cov, [r, g, b, a]) {
-  if (x < 0 || y < 0 || x >= S || y >= S || cov <= 0) return;
-  const i = (y * S + x) * 4;
+  if (x < 0 || y < 0 || x >= W || y >= H || cov <= 0) return;
+  const i = (y * W + x) * 4;
   const sa = a * cov;
   const da = img[i + 3];
   const outA = sa + da * (1 - sa);
@@ -48,8 +51,8 @@ const withA = (c, a) => [c[0], c[1], c[2], a];
 
 // fill a signed-distance field: sdf(x,y) < 0 is inside, ~1px anti-aliased edge
 function fillSDF(img, sdf, color, aa = 1.1) {
-  for (let y = 0; y < S; y++) {
-    for (let x = 0; x < S; x++) {
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
       const d = sdf(x + 0.5, y + 0.5);
       if (d > aa) continue;
       const cov = Math.min(1, Math.max(0, 0.5 - d / aa));
@@ -78,7 +81,10 @@ const capsule = (x1, y1, x2, y2, width) => (x, y) => {
   const pay = y - y1;
   const bax = x2 - x1;
   const bay = y2 - y1;
-  const t = Math.min(1, Math.max(0, (pax * bax + pay * bay) / (bax * bax + bay * bay)));
+  const t = Math.min(
+    1,
+    Math.max(0, (pax * bax + pay * bay) / (bax * bax + bay * bay)),
+  );
   return Math.hypot(pax - bax * t, pay - bay * t) - width / 2;
 };
 
@@ -95,7 +101,8 @@ const CRC_TABLE = (() => {
 })();
 function crc32(buf) {
   let c = 0xffffffff;
-  for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 255] ^ (c >>> 8);
+  for (let i = 0; i < buf.length; i++)
+    c = CRC_TABLE[(c ^ buf[i]) & 255] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
 }
 function png(type, data) {
@@ -109,16 +116,16 @@ function png(type, data) {
 function encodePNG(img) {
   const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
   const ihdr = Buffer.alloc(13);
-  ihdr.writeUInt32BE(S, 0);
-  ihdr.writeUInt32BE(S, 4);
+  ihdr.writeUInt32BE(W, 0);
+  ihdr.writeUInt32BE(H, 4);
   ihdr[8] = 8; // bit depth
   ihdr[9] = 6; // colour type RGBA
-  const raw = Buffer.alloc(S * (1 + S * 4));
-  for (let y = 0; y < S; y++) {
-    const row = y * (1 + S * 4);
+  const raw = Buffer.alloc(H * (1 + W * 4));
+  for (let y = 0; y < H; y++) {
+    const row = y * (1 + W * 4);
     raw[row] = 0; // filter: none
-    for (let x = 0; x < S; x++) {
-      const si = (y * S + x) * 4;
+    for (let x = 0; x < W; x++) {
+      const si = (y * W + x) * 4;
       const di = row + 1 + x * 4;
       const a = img[si + 3];
       raw[di] = Math.round(Math.min(1, Math.max(0, img[si])) * 255);
@@ -136,16 +143,15 @@ function encodePNG(img) {
   ]);
 }
 
-/* ---------- the three skins ---------- */
+/* ---------- shared helpers ---------- */
 
-// Directional shade over whatever alpha already exists, for form. `dir` in
-// radians; darker toward that side, lighter toward the opposite.
+// Directional shade over painted pixels, for form. `dir` in radians.
 function shade(img, cx, cy, radius, dir, darkColor, lightColor, strength = 0.5) {
   const dx = Math.cos(dir);
   const dy = Math.sin(dir);
-  for (let y = 0; y < S; y++) {
-    for (let x = 0; x < S; x++) {
-      const i = (y * S + x) * 4;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
       if (img[i + 3] <= 0) continue;
       const t = ((x - cx) * dx + (y - cy) * dy) / radius; // -1..1 across shape
       if (t < 0) blend(img, x, y, Math.min(1, -t) * strength, withA(darkColor, 1));
@@ -177,7 +183,8 @@ function mulberry32(a) {
   };
 }
 
-// One sakura flower centred at (cx,cy).
+/* ================= CHERRY ================= */
+
 function blossom(img, cx, cy, r, rot, rand) {
   const petal = hex("#ff86b8");
   const petalLo = hex("#ffd0e2");
@@ -190,10 +197,15 @@ function blossom(img, cx, cy, r, rot, rand) {
     fillSDF(img, ellipse(px, py, r * 0.42, r * 0.56, a + Math.PI / 2), petal);
     fillSDF(
       img,
-      ellipse(cx + Math.cos(a) * r * 0.36, cy + Math.sin(a) * r * 0.36, r * 0.24, r * 0.32, a + Math.PI / 2),
+      ellipse(
+        cx + Math.cos(a) * r * 0.36,
+        cy + Math.sin(a) * r * 0.36,
+        r * 0.24,
+        r * 0.32,
+        a + Math.PI / 2,
+      ),
       withA(petalLo, 0.75),
     );
-    // notched tip
     const nx = cx + Math.cos(a) * r * 1.15;
     const ny = cy + Math.sin(a) * r * 1.15;
     fillSDF(img, disc(nx, ny, r * 0.12), [0, 0, 0, 0]);
@@ -202,100 +214,41 @@ function blossom(img, cx, cy, r, rot, rand) {
   fillSDF(img, disc(cx, cy, r * 0.2), centre);
   for (let k = 0; k < 9; k++) {
     const a = (k / 9) * Math.PI * 2 + rand() * 0.4;
-    fillSDF(img, disc(cx + Math.cos(a) * r * 0.3, cy + Math.sin(a) * r * 0.3, r * 0.04), hex("#ffbf3d"));
+    fillSDF(
+      img,
+      disc(cx + Math.cos(a) * r * 0.3, cy + Math.sin(a) * r * 0.3, r * 0.04),
+      hex("#ffbf3d"),
+    );
   }
 }
 
-// CHERRY — a spray: 3 blossoms + loose petals, so it reads as a cluster
 function drawCherry() {
+  W = 1024;
+  H = 1024;
   const img = canvas();
   const rand = mulberry32(0xc4e1);
   const clusters = [
-    [S * 0.42, S * 0.4, S * 0.2, 0.2],
-    [S * 0.62, S * 0.56, S * 0.16, 1.1],
-    [S * 0.38, S * 0.66, S * 0.14, 2.3],
+    [W * 0.42, H * 0.4, W * 0.2, 0.2],
+    [W * 0.62, H * 0.56, W * 0.16, 1.1],
+    [W * 0.38, H * 0.66, W * 0.14, 2.3],
   ];
   for (const [cx, cy, r, rot] of clusters) blossom(img, cx, cy, r, rot, rand);
-  // loose petals
   for (let i = 0; i < 6; i++) {
-    const px = S * (0.2 + rand() * 0.6);
-    const py = S * (0.2 + rand() * 0.6);
-    const pr = S * (0.05 + rand() * 0.04);
+    const px = W * (0.2 + rand() * 0.6);
+    const py = H * (0.2 + rand() * 0.6);
+    const pr = W * (0.05 + rand() * 0.04);
     fillSDF(img, ellipse(px, py, pr, pr * 1.4, rand() * Math.PI), hex("#ff9ec6"));
   }
-  shade(img, S / 2, S / 2, S * 0.5, -Math.PI * 0.35, hex("#b64f86"), hex("#ffd9e8"), 0.4);
+  shade(img, W / 2, H / 2, W * 0.5, -Math.PI * 0.35, hex("#b64f86"), hex("#ffd9e8"), 0.4);
   grain(img, 0.05);
-  return img;
-}
-
-// One banknote rectangle.
-function bill(img, cx, cy, w, h, rot) {
-  const paper = hex("#5aa06a");
-  const ink = hex("#2c5b3c");
-  const light = hex("#8dc79a");
-  const c = Math.cos(-rot);
-  const s = Math.sin(-rot);
-  const rect = (bw, bh, rad) => (x, y) => {
-    const dx = x - cx;
-    const dy = y - cy;
-    const lx = dx * c - dy * s;
-    const ly = dx * s + dy * c;
-    const qx = Math.abs(lx) - (bw / 2 - rad);
-    const qy = Math.abs(ly) - (bh / 2 - rad);
-    return Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - rad;
-  };
-  fillSDF(img, rect(w, h, 22), paper);
-  fillSDF(img, (x, y) => Math.max(rect(w - 34, h - 34, 16)(x, y), -rect(w - 58, h - 58, 12)(x, y)), withA(ink, 0.8));
-  fillSDF(img, ellipse(cx, cy, w * 0.13, h * 0.34, rot), withA(light, 0.85));
-  fillSDF(img, (x, y) => {
-    const e = ((px, py, rx, ry) => {
-      const dx = px - cx;
-      const dy = py - cy;
-      const lx = (dx * c - dy * s) / rx;
-      const ly = (dx * s + dy * c) / ry;
-      return (Math.hypot(lx, ly) - 1) * Math.min(rx, ry);
-    })(x, y, w * 0.13, h * 0.34);
-    const inner = ((px, py, rx, ry) => {
-      const dx = px - cx;
-      const dy = py - cy;
-      const lx = (dx * c - dy * s) / rx;
-      const ly = (dx * s + dy * c) / ry;
-      return (Math.hypot(lx, ly) - 1) * Math.min(rx, ry);
-    })(x, y, w * 0.1, h * 0.28);
-    return Math.max(e, -inner);
-  }, withA(ink, 0.75));
-}
-
-// MONEY — a SINGLE banknote filling the frame (each instanced plane is one bill)
-function drawMoney() {
-  const img = canvas();
-  bill(img, S * 0.5, S * 0.5, S * 0.94, S * 0.42, 0);
-  // faint denomination numerals in the corners
-  const ink = hex("#2c5b3c");
-  for (const [nx, ny] of [
-    [S * 0.14, S * 0.3],
-    [S * 0.86, S * 0.7],
-  ]) {
-    fillSDF(img, disc(nx, ny, S * 0.05), withA(hex("#a9d6b4"), 0.9));
-    fillSDF(
-      img,
-      (x, y) => Math.max(disc(nx, ny, S * 0.05)(x, y), -disc(nx, ny, S * 0.035)(x, y)),
-      withA(ink, 0.9),
-    );
-  }
-  shade(img, S / 2, S / 2, S * 0.5, -Math.PI * 0.4, hex("#265239"), hex("#a9d6b4"), 0.4);
-  grain(img, 0.06);
   return img;
 }
 
 /* ---------- run ---------- */
 
 mkdirSync(OUT, { recursive: true });
-for (const [name, draw] of [
-  ["cherry", drawCherry],
-  ["money", drawMoney],
-]) {
+for (const [name, draw] of [["cherry", drawCherry]]) {
   const file = resolve(OUT, `${name}.png`);
   writeFileSync(file, encodePNG(draw()));
-  console.log("wrote", file);
+  console.log("wrote", file, `${W}x${H}`);
 }

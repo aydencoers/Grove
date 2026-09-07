@@ -3,27 +3,10 @@
 import { useState } from "react";
 
 import { Tree3D } from "@/components/tree/tree-3d";
+import type { TreeState } from "@/lib/derive";
 import { formatSignedPct } from "@/lib/format";
-import { SKIN_LIST, type SkinId } from "@/lib/tree-skins";
+import { SKIN_LIST, skinSwatch, type SkinId } from "@/lib/tree-skins";
 import { cn } from "@/lib/utils";
-
-interface TreeStageProps {
-  ticker: string;
-  stage: number;
-  stageLabel: string;
-  healthLabel: string;
-  /** Tree healthScore in [-1, 1]. */
-  healthUnit: number;
-  /** 0–1, elevated 20-day stdev. */
-  volatility: number;
-  /** Skin stored on the planting record. */
-  skin: SkinId;
-  /** Down day → falling-leaf particles in the current skin. */
-  shedding: boolean;
-  peakReturnPct: number;
-  totalReturnPct: number;
-  return30dPct: number;
-}
 
 const TOTAL_STAGES = 5;
 
@@ -32,27 +15,27 @@ const TOTAL_STAGES = 5;
  * the structure / health readouts that convey the same state in text
  * (SPEC §10 accessibility).
  */
-export function TreeStage({
-  ticker,
-  stage,
-  stageLabel,
-  healthLabel,
-  healthUnit,
-  volatility,
-  skin: initialSkin,
-  shedding,
-  peakReturnPct,
-  totalReturnPct,
-  return30dPct,
-}: TreeStageProps) {
+export function TreeStage({ state }: { state: TreeState }) {
+  const {
+    ticker,
+    structureStage,
+    structureStageLabel,
+    healthLabel,
+    healthScore,
+    volatility,
+    totalReturnPct,
+    peakReturnPct,
+    skin: initialSkin,
+  } = state;
+
   // Would PATCH the planting record; no backend yet, so it's local for now.
   const [skin, setSkin] = useState<SkinId>(initialSkin);
 
   const label =
-    `${stageLabel}, structure stage ${stage} of ${TOTAL_STAGES}. ` +
+    `${structureStageLabel}, structure stage ${structureStage} of ${TOTAL_STAGES}. ` +
     `Health: ${healthLabel}. Total return since planting ${formatSignedPct(totalReturnPct)}, ` +
     `with a peak of ${formatSignedPct(peakReturnPct)}. ` +
-    `Recent 30-day trend ${formatSignedPct(return30dPct)}.`;
+    `Recent trend ${formatSignedPct(healthScore)}.`;
 
   return (
     <div className="flex flex-col gap-5">
@@ -64,11 +47,10 @@ export function TreeStage({
         <Tree3D
           className="absolute inset-0"
           ticker={ticker}
-          structureStage={stage}
-          healthScore={healthUnit}
+          structureStage={structureStage}
+          healthScore={healthScore}
           volatility={volatility}
           skin={skin}
-          shedding={shedding}
         />
 
         {/* leaf-skin picker */}
@@ -90,7 +72,7 @@ export function TreeStage({
                   ? "border-white ring-2 ring-white/60"
                   : "border-white/40 hover:border-white/80",
               )}
-              style={{ background: s.ramp.thriving }}
+              style={{ background: skinSwatch(s) }}
             >
               <span className="sr-only">{s.label}</span>
             </button>
@@ -98,7 +80,7 @@ export function TreeStage({
         </div>
 
         <figcaption className="pointer-events-none absolute bottom-3 left-4 right-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-white/90 [text-shadow:0_1px_3px_rgb(0_0_0/0.55)]">
-          <span className="font-medium">{stageLabel}</span>
+          <span className="font-medium">{structureStageLabel}</span>
           <span aria-hidden>·</span>
           <span>{healthLabel} right now</span>
           <span aria-hidden>·</span>
@@ -116,7 +98,7 @@ export function TreeStage({
               Structure
             </span>
             <span className="text-xs text-muted-foreground tabular-nums">
-              Stage {stage} of {TOTAL_STAGES}
+              Stage {structureStage} of {TOTAL_STAGES}
             </span>
           </div>
           <div className="flex gap-1.5" aria-hidden>
@@ -125,14 +107,14 @@ export function TreeStage({
                 key={i}
                 className={cn(
                   "h-1.5 flex-1 rounded-full transition-colors",
-                  i < stage ? "bg-foliage" : "bg-foliage/15"
+                  i < structureStage ? "bg-foliage" : "bg-foliage/15",
                 )}
               />
             ))}
           </div>
           <p className="text-sm text-foreground/80">
-            <span className="font-medium">{stageLabel}.</span> Holds your peak
-            return of{" "}
+            <span className="font-medium">{structureStageLabel}.</span> Holds your
+            peak return of{" "}
             <span className="tabular-nums">
               {formatSignedPct(peakReturnPct, 1)}
             </span>{" "}
@@ -145,7 +127,7 @@ export function TreeStage({
             <span className="text-[0.7rem] font-medium uppercase tracking-[0.08em] text-muted-foreground">
               Health
             </span>
-            <span className="text-xs text-muted-foreground">last 30 days</span>
+            <span className="text-xs text-muted-foreground">recent trend</span>
           </div>
           <div className="flex items-center gap-2">
             <span className="inline-flex items-center gap-1.5 rounded-full bg-secondary px-2.5 py-1 text-xs font-medium text-secondary-foreground">
@@ -157,7 +139,7 @@ export function TreeStage({
               {healthLabel}
             </span>
             <span className="text-sm text-muted-foreground tabular-nums">
-              {formatSignedPct(return30dPct, 1)} trend
+              {formatSignedPct(healthScore, 1)} trend
             </span>
           </div>
           <p className="text-sm text-foreground/80">

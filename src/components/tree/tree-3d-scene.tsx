@@ -20,9 +20,12 @@ import { Tree } from "@dgreenheck/ez-tree";
 
 import {
   applyGeometryOptions,
+  fireChar,
   hashToSeed,
-  healthToLeafDensity,
+  healthToBranchKeep,
   mulberry32,
+  resolveFireTier,
+  stageIndex,
   volatilityBucket,
   volatilityToWind,
 } from "@/lib/tree3d";
@@ -30,10 +33,14 @@ import {
   BARK_COLOR,
   GROUND_COLOR,
   getSkin,
+  healthRamp,
   type LeafSkin,
   type SkinId,
-  skinLeafColor,
 } from "@/lib/tree-skins";
+
+// direction toward the scene's warm key light (see SceneContents) — the gold
+// skin glints on this
+const KEY_LIGHT_DIR = new THREE.Vector3(0.9, 1.3, 0.5).normalize();
 
 export interface Tree3DSceneProps {
   ticker: string;
@@ -42,10 +49,12 @@ export interface Tree3DSceneProps {
   volatility: number;
   /** which leaf skin this planting uses */
   skin: SkinId;
-  /** true on a down day — spawns falling foliage motes in the skin's colour */
-  shedding?: boolean;
+  /** fire animation rate multiplier (default 0.3). */
+  fireSpeed?: number;
   interactive?: boolean;
 }
+
+const DEFAULT_FIRE_SPEED = 0.3;
 
 /* ------------------------------------------------------------------ */
 /* stylised toon shading — one shared 4-band gradient map              */
@@ -103,25 +112,6 @@ function useMountGrow(durationSec = 0.5) {
     const e = 1 - Math.pow(1 - t, 3); // ease-out cubic
     return 0.82 + 0.18 * e;
   };
-}
-
-/* ------------------------------------------------------------------ */
-/* leaf-skin textures (money note still uses one)                      */
-/* ------------------------------------------------------------------ */
-
-const textureLoader = new THREE.TextureLoader();
-const skinTextureCache = new Map<string, THREE.Texture>();
-
-function skinTexture(url: string): THREE.Texture {
-  let tex = skinTextureCache.get(url);
-  if (!tex) {
-    tex = textureLoader.load(url);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.anisotropy = 4;
-    tex.needsUpdate = true;
-    skinTextureCache.set(url, tex);
-  }
-  return tex;
 }
 
 /* ------------------------------------------------------------------ */
@@ -359,25 +349,7 @@ function buildBlossomGeometry(): THREE.BufferGeometry {
   return geo;
 }
 
-// a SINGLE plane (no thickness) that hangs from its top edge, with a gentle
-// two-axis curl so it reads as paper rather than a slab
-function buildNoteGeometry(w: number, h: number): THREE.BufferGeometry {
-  const g = new THREE.PlaneGeometry(w, h, 10, 4);
-  g.translate(0, -h / 2, 0); // top edge at the origin → hangs from there
-  const p = g.attributes.position;
-  for (let i = 0; i < p.count; i++) {
-    const u = p.getX(i) / w; // -0.5..0.5
-    const v = p.getY(i) / h; // 0..-1 (top..bottom)
-    p.setZ(
-      i,
-      Math.sin(u * Math.PI) * w * 0.11 + Math.sin(v * Math.PI * 1.4) * h * 0.06,
-    );
-  }
-  g.computeVertexNormals();
-  return g;
-}
-
-/* wind: rotate an instance about a pivot in the vertex shader */
+/* wind: rotate an instance about a pivot in the vertex shader (blob + blossom) */
 function attachWindShader(
   mat: THREE.Material,
   pivotY: number,
@@ -409,6 +381,55 @@ function attachWindShader(
   };
 }
 
+/* gold: a Blinn-ish specular glint from the key light on top of the flat toon
+   shading, so the leaves read as metal-leaf rather than yellow paper. Chained
+   AFTER attachWindShader so the wind injection survives (a bare re-assign of
+   onBeforeCompile would clobber it). */
+function attachToonSheen(
+  mat: THREE.Material,
+  keyDir: THREE.Vector3,
+  strength: number,
+) {
+  const prev = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader, renderer) => {
+    prev?.(shader, renderer);
+    shader.uniforms.uSheenDir = { value: keyDir.clone().normalize() };
+    shader.uniforms.uSheen = { value: strength };
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        "#include <common>",
+        "#include <common>\nvarying vec3 vSheenN; varying vec3 vSheenWP;",
+      )
+      .replace(
+        "#include <project_vertex>",
+        `#include <project_vertex>
+         #ifdef USE_INSTANCING
+           vSheenN = normalize(mat3(modelMatrix) * mat3(instanceMatrix) * objectNormal);
+           vSheenWP = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;
+         #else
+           vSheenN = normalize(mat3(modelMatrix) * objectNormal);
+           vSheenWP = (modelMatrix * vec4(transformed, 1.0)).xyz;
+         #endif`,
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+         uniform vec3 uSheenDir; uniform float uSheen;
+         varying vec3 vSheenN; varying vec3 vSheenWP;`,
+      )
+      .replace(
+        "#include <opaque_fragment>",
+        `vec3 _sV = normalize(cameraPosition - vSheenWP);
+         vec3 _sH = normalize(normalize(uSheenDir) + _sV);
+         float _sp = pow(max(dot(normalize(vSheenN), _sH), 0.0), 26.0);
+         // warm highlight, tinted by the leaf's own colour so it stays gold
+         outgoingLight += _sp * uSheen * (0.5 + 0.5 * diffuseColor.rgb);
+         #include <opaque_fragment>`,
+      );
+  };
+}
+
 const _m = new THREE.Matrix4();
 const _q = new THREE.Quaternion();
 const _tmpQ = new THREE.Quaternion();
@@ -417,25 +438,50 @@ const _p = new THREE.Vector3();
 const _radial = new THREE.Vector3();
 const _zAxis = new THREE.Vector3(0, 0, 1);
 
+const _charLeaf = new THREE.Color("#0a0503"); // near-black soot
+
 function SkinnedCanopy({
   tree,
   gen,
   skin,
+  structureStage,
   healthScore,
   volatility,
   bounds,
+  char,
 }: {
   tree: Tree;
   gen: number;
   skin: LeafSkin;
+  structureStage: number;
   healthScore: number;
   volatility: number;
   bounds: TreeBounds;
+  /** 0..1 fire char — darkens the foliage and burns extra away. */
+  char: number;
 }) {
   const kind = skin.leaf.kind;
-  const wind =
-    volatilityToWind(volatility) * skin.leaf.windAmp * (kind === "note" ? 0.14 : 0.08);
-  const healthDensity = healthToLeafDensity(healthScore);
+  const stg = stageIndex(structureStage);
+  // old trees carry HEAVIER canopies — more clusters AND bigger ones, so
+  // density per branch rises (not the same foliage stretched over more wood).
+  const older = Math.max(0, stg - 3); // 0 at stage ≤3, 1 at 4, 2 at 5
+  const wind = volatilityToWind(volatility) * skin.leaf.windAmp * 0.08;
+  // health = colour + foliage density + canopy droop + emissive, together.
+  // healthScore is a blended recent-return PERCENT (SPEC §2), NOT a unit scale.
+  const hr = healthRamp(skin, healthScore);
+  // Fire in the canopy = the foliage there is SCORCHED. Whenever the tree is
+  // burning at all, the clusters go to blackened remnants (kept, not deleted —
+  // charred remains read as fire far better than clean bare branches) with a
+  // dull ember glow, and they shrink to gnarled lumps rather than smooth balls.
+  const burning = char > 0;
+  const leafCol = burning
+    ? new THREE.Color(hr.color)
+        .lerp(_charLeaf, Math.min(1, 0.82 + char * 0.18))
+        .getStyle()
+    : hr.color;
+  const leafEmScale = hr.emissiveScale * (1 - char * 0.85);
+  const charScale = burning ? 1 - char * 0.5 : 1; // burnt clumps are smaller
+  const emberEmissive = burning ? "#3a0c04" : skin.leaf.emissive;
 
   const built = useMemo(() => {
     const anchors = extractLeafAnchors(tree, bounds);
@@ -450,38 +496,49 @@ function SkinnedCanopy({
       anchors[j] = t;
     }
 
-    // Stylised low-count canopy. Money keeps more instances (notes are big and
-    // must not look detached) — its own multiplier, not the shared one.
-    const perKind = kind === "blob" ? 0.07 : kind === "blossom" ? 0.05 : 0.17;
-    const capKind = kind === "blob" ? 320 : kind === "blossom" ? 260 : 580;
+    // per-branch multiplier (NOT a hardcoded count): total scales with the
+    // anchor supply, which scales with branch count. `older` bumps it further.
+    const perKind = (kind === "blob" ? 0.078 : 0.052) * (1 + 0.16 * older);
+    const capKind =
+      (kind === "blob" ? 340 : 280) + Math.round(150 * older);
     const target = Math.round(
       THREE.MathUtils.clamp(
-        anchors.length * perKind * skin.leaf.densityMul * (0.5 + 0.5 * healthDensity),
-        8,
+        anchors.length *
+          perKind *
+          skin.leaf.densityMul *
+          Math.max(0.04, hr.density) *
+          (1 - char * 0.5), // KEEP ~half as charred remnants, don't delete
+        4,
         capKind,
       ),
     );
+    // foliage recedes WITH the branches: anchors well outside the surviving
+    // branch fraction are mostly culled (dieback from the tips inward).
+    const branchKeep = healthToBranchKeep(healthScore);
     const bias = skin.leaf.branchBias;
     const kept: LeafAnchor[] = [];
     for (const a of anchors) {
       if (kept.length >= target) break;
+      if (a.r > branchKeep + 0.12 && rand() > 0.18) continue;
       const edgeTrim = 1 - bias * Math.max(0, a.r - 0.3) * 1.1;
       if (rand() < Math.max(0.4, edgeTrim)) kept.push(a);
     }
 
     const sizeFit =
       kind === "blob" ? bounds.radius * 0.14 : bounds.radius * 0.36;
-    const s = THREE.MathUtils.clamp(
-      sizeFit,
-      kind === "blob" ? 0.5 : 1.2,
-      skin.leaf.size,
-    );
-    const h = s / skin.leaf.aspect;
+    const s =
+      THREE.MathUtils.clamp(
+        sizeFit,
+        kind === "blob" ? 0.5 : 1.2,
+        skin.leaf.size,
+      ) *
+      (1 + 0.14 * older) * // heavier clusters on old trees
+      charScale; // ...but gnarled + shrunken once burnt
 
     let geo: THREE.BufferGeometry;
     let mat: THREE.MeshToonMaterial;
     const pivotY = 0;
-    let span = s;
+    const span = s;
 
     if (kind === "blob") {
       geo = buildBlobGeometry();
@@ -489,75 +546,37 @@ function SkinnedCanopy({
       // the clumps don't read as one solid mass
       mat = toonMaterial({
         color: "#ffffff",
-        emissive: skin.leaf.emissive,
-        emissiveIntensity: 0.16,
+        emissive: emberEmissive,
+        emissiveIntensity: burning ? 0.13 : 0.16 * leafEmScale,
         flatShading: true,
       });
-    } else if (kind === "blossom") {
+      attachWindShader(mat, pivotY, span, 0.5, wind);
+    } else {
       geo = buildBlossomGeometry();
       mat = toonMaterial({
-        color: skinLeafColor(skin, healthScore),
-        emissive: skin.leaf.emissive,
-        emissiveIntensity: 0.42,
+        color: leafCol,
+        emissive: emberEmissive,
+        emissiveIntensity: burning
+          ? 0.13
+          : 0.42 * (skin.leaf.emissiveMul ?? 1) * leafEmScale,
       });
-    } else {
-      geo = buildNoteGeometry(s, h);
-      mat = toonMaterial({
-        color: skinLeafColor(skin, healthScore),
-        map: skin.texture ? skinTexture(skin.texture) : null,
-        alphaTest: 0.45, // hard cutout — no blending, no sort issues
-        emissive: skin.leaf.emissive,
-        emissiveIntensity: 0.22,
-      });
-      span = h;
+      attachWindShader(mat, pivotY, span, 0.5, wind);
+      // gold: add a metallic key-light glint on top of the flat toon shading
+      if (skin.leaf.sheen) {
+        attachToonSheen(mat, KEY_LIGHT_DIR, skin.leaf.sheen);
+      }
     }
-    attachWindShader(mat, pivotY, span, kind === "note" ? 1 : 0.5, wind);
-
-    // money: a near-invisible stub connects each note to the branch
-    const stemGeo =
-      kind === "note" ? new THREE.CylinderGeometry(0.03, 0.045, 1, 4) : null;
-    const stemMat = stemGeo
-      ? toonMaterial({ color: BARK_COLOR, emissive: "#241640", emissiveIntensity: 0.4 })
-      : null;
-    const stemMatrices: THREE.Matrix4[] = [];
 
     const matrices: THREE.Matrix4[] = [];
     for (const a of kept) {
       _p.copy(a.pos);
 
-      if (kind === "note") {
-        // attach on the branch; near-zero stub; note hangs from its top edge
-        _radial.set(a.pos.x, 0, a.pos.z).normalize();
-        _p.addScaledVector(a.up, (rand() - 0.5) * s * 0.45);
-        _p.addScaledVector(_radial, (rand() - 0.15) * s * 0.3);
-        const attach = _p.clone();
-        const stemLen = s * (0.03 + rand() * 0.05);
-        const pivot = attach
-          .clone()
-          .add(new THREE.Vector3(0, -stemLen, 0));
-        const len = Math.max(0.01, pivot.clone().sub(attach).length());
-        _q.identity(); // stub is vertical
-        _s.set(1, len, 1);
-        stemMatrices.push(
-          _m.clone().compose(attach.clone().lerp(pivot, 0.5), _q.clone(), _s.clone()),
-        );
-        // full-360 yaw + ±40° pitch & roll → no two hang alike, some edge-on;
-        // wind swings each from its top-edge pivot (pivotY = 0)
-        _q.setFromEuler(
-          new THREE.Euler(
-            (rand() - 0.5) * 1.4,
-            rand() * Math.PI * 2,
-            (rand() - 0.5) * 1.4,
-          ),
-        );
-        _s.set(0.85 + rand() * 0.55, 0.85 + rand() * 0.5, 1);
-        matrices.push(_m.clone().compose(pivot, _q.clone(), _s.clone()));
-        continue;
-      }
-
       // blossom + blob share an irregular offset
       _p.addScaledVector(a.up, (rand() - 0.5) * s * 1.3);
       _p.addScaledVector(a.normal, (rand() - 0.5) * s * 0.9);
+      // canopy droop — a struggling tree sags, worst at the outer edge where
+      // the branches are thinnest. Healthy trees (droop ≈ 0) don't move.
+      _p.y -= hr.droop * s * (kind === "blob" ? 3.0 : 2.2) * (0.3 + 0.7 * a.r);
 
       if (kind === "blossom") {
         const dir = a.normal
@@ -594,7 +613,10 @@ function SkinnedCanopy({
     for (let i = 0; i < matrices.length; i++) mesh.setMatrixAt(i, matrices[i]);
     mesh.instanceMatrix.needsUpdate = true;
 
-    // per-instance hue/lightness jitter for blobs
+    // per-instance hue/lightness jitter for blobs so the canopy reads as many
+    // clumps, not one mass. material.color stays white; instanceColor carries
+    // the health colour. (blossom/gold take the health colour on material.color
+    // directly — see the colour-only effect below.)
     let hueJit: Float32Array | null = null;
     if (kind === "blob") {
       hueJit = new Float32Array(matrices.length * 3);
@@ -607,44 +629,34 @@ function SkinnedCanopy({
         hueJit[i * 3] = dh;
         hueJit[i * 3 + 1] = ds;
         hueJit[i * 3 + 2] = dl;
-        c.set(skinLeafColor(skin, healthScore)).offsetHSL(dh, ds, dl);
+        c.set(leafCol).offsetHSL(dh, ds, dl);
         mesh.setColorAt(i, c);
       }
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
 
-    let stems: THREE.InstancedMesh | null = null;
-    if (stemGeo && stemMat && stemMatrices.length) {
-      stems = new THREE.InstancedMesh(stemGeo, stemMat, stemMatrices.length);
-      stems.castShadow = true;
-      stems.frustumCulled = false;
-      for (let i = 0; i < stemMatrices.length; i++)
-        stems.setMatrixAt(i, stemMatrices[i]);
-      stems.instanceMatrix.needsUpdate = true;
-    }
-
     return {
       mesh,
-      stems,
       geo,
       mat,
-      stemGeo,
-      stemMat,
       hueJit,
       count: matrices.length,
     };
+    // healthScore + char are in here on purpose: they move foliage DENSITY,
+    // canopy DROOP and the recede-with-branches cull, which are geometry of
+    // THIS InstancedMesh — never the ez-tree trunk (its own effect, no
+    // regenerate for health).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tree, gen, skin, bounds.height, bounds.radius]);
+  }, [tree, gen, skin, structureStage, bounds.height, bounds.radius, healthScore, char]);
 
-  // health tint — MATERIAL only, no regenerate. Blobs re-tint per-instance so
-  // the hue variation survives.
+  // colour-only fast path: keep the live material in sync when the rebuilt
+  // mesh above hasn't remounted yet this frame.
   useEffect(() => {
     if (!built) return;
     if (built.hueJit) {
-      const hex = skinLeafColor(skin, healthScore);
       const c = new THREE.Color();
       for (let i = 0; i < built.count; i++) {
-        c.set(hex).offsetHSL(
+        c.set(leafCol).offsetHSL(
           built.hueJit[i * 3],
           built.hueJit[i * 3 + 1],
           built.hueJit[i * 3 + 2],
@@ -653,9 +665,9 @@ function SkinnedCanopy({
       }
       if (built.mesh.instanceColor) built.mesh.instanceColor.needsUpdate = true;
     } else {
-      built.mat.color.set(skinLeafColor(skin, healthScore));
+      built.mat.color.set(leafCol);
     }
-  }, [built, skin, healthScore]);
+  }, [built, leafCol]);
 
   useEffect(() => {
     return () => {
@@ -663,9 +675,6 @@ function SkinnedCanopy({
       built.geo.dispose();
       built.mat.dispose();
       built.mesh.dispose();
-      built.stemGeo?.dispose();
-      built.stemMat?.dispose();
-      built.stems?.dispose();
     };
   }, [built]);
 
@@ -680,12 +689,7 @@ function SkinnedCanopy({
   });
 
   if (!built) return null;
-  return (
-    <>
-      <primitive object={built.mesh} />
-      {built.stems && <primitive object={built.stems} />}
-    </>
-  );
+  return <primitive object={built.mesh} />;
 }
 
 /* ------------------------------------------------------------------ */
@@ -736,7 +740,7 @@ function FallingFoliage({
       }),
   );
   useEffect(() => {
-    material.color.set(skinLeafColor(skin, healthScore));
+    material.color.set(healthRamp(skin, healthScore).color);
   }, [material, skin, healthScore]);
   useEffect(() => () => {
     geometry.dispose();
@@ -763,6 +767,350 @@ function FallingFoliage({
   });
 
   return <points geometry={geometry} material={material} frustumCulled={false} />;
+}
+
+/* ------------------------------------------------------------------ */
+/* fire — acute distress. HEALTH threshold + hysteresis (see tree3d.ts) */
+/* ------------------------------------------------------------------ */
+
+/** health % + previous tier → new tier, kept in state so hysteresis can hold. */
+function useFireTier(healthScore: number): number {
+  const [tier, setTier] = useState(() => resolveFireTier(healthScore, 0));
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setTier((prev) => resolveFireTier(healthScore, prev));
+  }, [healthScore]);
+  return tier;
+}
+
+const smokeSprite = (() => {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const ctx = c.getContext("2d")!;
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, "rgba(255,255,255,0.9)");
+  g.addColorStop(0.5, "rgba(255,255,255,0.35)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+})();
+
+// PARTICLE fire — a dense mass of small embers churning up from the branches
+// (the tapered-cone version read as traffic cones). Soft round alpha sprite;
+// all colour comes from the fragment shader — no white core.
+const flameSprite = (() => {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const ctx = c.getContext("2d")!;
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, "rgba(255,255,255,0.95)");
+  g.addColorStop(0.4, "rgba(255,255,255,0.45)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+})();
+
+const FLAME_VERT = `
+  attribute vec3 aBase;
+  attribute float aSeed;
+  uniform float uTime;
+  uniform float uRise;
+  uniform float uSize;
+  varying float vLife;
+  float h11(float p){ return fract(sin(p * 127.1) * 43758.5453); }
+  void main() {
+    // uTime is already scaled by the dev fireSpeed knob before it reaches here.
+    float sp = 0.7 + 1.5 * fract(aSeed * 91.7);           // per-ember rate spread
+    float life = fract(uTime * sp + aSeed);                // long cycle -> persists
+    vLife = life;
+    vec3 p = aBase;
+    // accelerating rise
+    p.y += (life * life * 0.65 + life * 0.35) * uRise;
+    // erratic lateral velocity — jittery, but churning, not racing
+    float st = h11(floor(uTime * 12.0 + aSeed * 9.0)) - 0.5;
+    p.x += (sin(uTime * 8.0 + aSeed * 40.0) * 0.09
+          + sin(uTime * 18.0 + aSeed * 17.0) * 0.04
+          + st * 0.16) * uRise * life;
+    p.z += (cos(uTime * 9.0 + aSeed * 33.0) * 0.09
+          + (h11(floor(uTime * 10.0 + aSeed * 3.0)) - 0.5) * 0.14) * uRise * life;
+    vec4 mv = modelViewMatrix * vec4(p, 1.0);
+    gl_PointSize = uSize * (1.15 - life * 0.8) * (520.0 / max(1.0, -mv.z));
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+const FLAME_FRAG = `
+  uniform sampler2D uTex;
+  varying float vLife;
+  void main() {
+    float a = texture2D(uTex, gl_PointCoord).a;
+    // deep red at birth -> hot orange as it climbs. NO yellow, NO white.
+    vec3 col = mix(vec3(0.6, 0.05, 0.015), vec3(1.0, 0.42, 0.05), smoothstep(0.0, 0.5, vLife));
+    col = mix(col, vec3(0.24, 0.04, 0.02), smoothstep(0.62, 1.0, vLife)); // soot out
+    // slower fade so embers hang around and the mass stays dense
+    a *= smoothstep(0.0, 0.05, vLife) * (1.0 - smoothstep(0.74, 1.0, vLife));
+    if (a < 0.02) discard;
+    gl_FragColor = vec4(col, a * 0.9);
+  }
+`;
+
+function makeFlameLayer(
+  base: Float32Array,
+  seeds: Float32Array,
+  rise: number,
+  size: number,
+): THREE.Points {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("aBase", new THREE.BufferAttribute(base, 3));
+  g.setAttribute("aSeed", new THREE.BufferAttribute(seeds, 1));
+  g.setAttribute(
+    "position",
+    new THREE.BufferAttribute(new Float32Array(seeds.length * 3), 3),
+  );
+  const m = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uRise: { value: rise },
+      uSize: { value: size },
+      uTex: { value: flameSprite },
+    },
+    vertexShader: FLAME_VERT,
+    fragmentShader: FLAME_FRAG,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const pts = new THREE.Points(g, m);
+  pts.frustumCulled = false;
+  return pts;
+}
+
+const SMOKE_VERT = `
+  attribute vec3 aBase;
+  attribute float aSeed;
+  uniform float uTime;
+  uniform float uRise;
+  uniform float uSize;
+  varying float vLife;
+  void main() {
+    float sp = 0.4 + 0.6 * fract(aSeed * 71.3);
+    float life = fract(uTime * sp * 0.16 + aSeed);
+    vLife = life;
+    vec3 p = aBase;
+    p.y += life * uRise;
+    p.x += sin(uTime * 0.7 + aSeed * 20.0) * life * uRise * 0.4;
+    p.z += cos(uTime * 0.6 + aSeed * 15.0) * life * uRise * 0.4;
+    vec4 mv = modelViewMatrix * vec4(p, 1.0);
+    gl_PointSize = uSize * (0.4 + life * 1.8) * (320.0 / max(1.0, -mv.z));
+    gl_Position = projectionMatrix * mv;
+  }
+`;
+const SMOKE_FRAG = `
+  uniform sampler2D uTex;
+  varying float vLife;
+  void main() {
+    float a = texture2D(uTex, gl_PointCoord).a;
+    a *= smoothstep(0.0, 0.12, vLife) * (1.0 - smoothstep(0.45, 1.0, vLife)) * 0.5;
+    if (a < 0.01) discard;
+    gl_FragColor = vec4(vec3(0.05, 0.045, 0.05), a);
+  }
+`;
+
+function makeSmoke(
+  base: Float32Array,
+  seeds: Float32Array,
+  rise: number,
+  size: number,
+): THREE.Points {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("aBase", new THREE.BufferAttribute(base, 3));
+  g.setAttribute("aSeed", new THREE.BufferAttribute(seeds, 1));
+  g.setAttribute(
+    "position",
+    new THREE.BufferAttribute(new Float32Array(seeds.length * 3), 3),
+  );
+  const m = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uRise: { value: rise },
+      uSize: { value: size },
+      uTex: { value: smokeSprite },
+    },
+    vertexShader: SMOKE_VERT,
+    fragmentShader: SMOKE_FRAG,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.NormalBlending,
+  });
+  const pts = new THREE.Points(g, m);
+  pts.frustumCulled = false;
+  return pts;
+}
+
+function Fire({
+  tree,
+  gen,
+  bounds,
+  tier,
+  speed,
+}: {
+  tree: Tree;
+  gen: number;
+  bounds: TreeBounds;
+  tier: number;
+  /** dev animation-rate knob — all flame/smoke/light timing scales by this. */
+  speed: number;
+}) {
+  const lightRef = useRef<THREE.PointLight>(null);
+  const groundLightRef = useRef<THREE.PointLight>(null);
+  const lightBase = tier === 1 ? 5 : tier === 2 ? 16 : 32;
+
+  const built = useMemo(() => {
+    if (tier <= 0) return null;
+    const anchors = extractLeafAnchors(tree, bounds);
+    if (anchors.length === 0) return null;
+    const rand = mulberry32(hashToSeed(`fire:${gen}:${tier}`));
+
+    const rise = bounds.height * (tier === 1 ? 0.13 : tier === 2 ? 0.2 : 0.3);
+    // MANY, small — a dense churning mass, not scattered points
+    const count = tier === 1 ? 2400 : tier === 2 ? 6000 : 9500;
+    const size = Math.max(2, bounds.radius * (tier === 1 ? 0.045 : 0.06));
+
+    let sites = tier === 1 ? anchors.filter((a) => a.h > 0.5) : anchors.slice();
+    if (sites.length === 0) sites = anchors.slice();
+    for (let i = sites.length - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      const t = sites[i];
+      sites[i] = sites[j];
+      sites[j] = t;
+    }
+
+    // embers cluster TIGHT to the branches, and CLUMPY (rand² picks the same
+    // anchors repeatedly) so they pile into a mass instead of a fine mist
+    const base = new Float32Array(count * 3);
+    const seeds = new Float32Array(count);
+    for (let i = 0; i < count; i++) {
+      const a = sites[Math.floor(rand() * rand() * sites.length)];
+      base[i * 3] = a.pos.x + (rand() - 0.5) * 0.5;
+      base[i * 3 + 1] = a.pos.y + (rand() - 0.5) * 0.9;
+      base[i * 3 + 2] = a.pos.z + (rand() - 0.5) * 0.5;
+      seeds[i] = rand();
+    }
+    const flames = makeFlameLayer(base, seeds, rise, size);
+
+    // GROUND fire (tier 3): irregular clusters with bare gaps, hugging the base
+    let ground: THREE.Points | null = null;
+    if (tier === 3) {
+      const gc = 3000;
+      const gb = new Float32Array(gc * 3);
+      const gs = new Float32Array(gc);
+      const centres: [number, number][] = [];
+      for (let c = 0; c < 7; c++) {
+        const ang = rand() * Math.PI * 2;
+        const rad = bounds.radius * (0.2 + rand() * 0.95);
+        centres.push([Math.cos(ang) * rad, Math.sin(ang) * rad]);
+      }
+      for (let i = 0; i < gc; i++) {
+        const [cx, cz] = centres[i % centres.length];
+        gb[i * 3] = cx + (rand() - 0.5) * bounds.radius * 0.22;
+        gb[i * 3 + 1] = rand() * 1.0;
+        gb[i * 3 + 2] = cz + (rand() - 0.5) * bounds.radius * 0.22;
+        gs[i] = rand();
+      }
+      ground = makeFlameLayer(gb, gs, bounds.height * 0.09, size * 1.35);
+    }
+
+    // dark smoke rising ABOVE the flames
+    let smoke: THREE.Points | null = null;
+    if (tier >= 2) {
+      const sc = tier === 2 ? 90 : 170;
+      const sb = new Float32Array(sc * 3);
+      const ss = new Float32Array(sc);
+      for (let i = 0; i < sc; i++) {
+        const a = sites[(i * 7) % sites.length];
+        sb[i * 3] = a.pos.x + (rand() - 0.5) * bounds.radius * 0.3;
+        sb[i * 3 + 1] = a.pos.y + rise * 1.4 + (rand() - 0.5) * 2;
+        sb[i * 3 + 2] = a.pos.z + (rand() - 0.5) * bounds.radius * 0.3;
+        ss[i] = rand();
+      }
+      smoke = makeSmoke(
+        sb,
+        ss,
+        bounds.height * (tier === 2 ? 0.55 : 0.9),
+        Math.max(6, bounds.radius * 0.55),
+      );
+    }
+
+    return { flames, ground, smoke };
+    // key on the bounds primitives, not the object identity
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tree, gen, bounds.height, bounds.radius, tier]);
+
+  useEffect(() => {
+    return () => {
+      if (!built) return;
+      built.flames.geometry.dispose();
+      (built.flames.material as THREE.Material).dispose();
+      built.ground?.geometry.dispose();
+      (built.ground?.material as THREE.Material | undefined)?.dispose();
+      built.smoke?.geometry.dispose();
+      (built.smoke?.material as THREE.Material | undefined)?.dispose();
+    };
+  }, [built]);
+
+  useFrame((state) => {
+    // scale ALL fire timing by the dev speed knob
+    const t = state.clock.elapsedTime * speed;
+    if (built) {
+      (built.flames.material as THREE.ShaderMaterial).uniforms.uTime.value = t;
+      if (built.ground)
+        (built.ground.material as THREE.ShaderMaterial).uniforms.uTime.value = t;
+      if (built.smoke)
+        (built.smoke.material as THREE.ShaderMaterial).uniforms.uTime.value = t;
+    }
+    // two lights, jittery on different clocks — the fire has to visibly light
+    // its surroundings or it reads as pasted on
+    if (lightRef.current) {
+      const f =
+        0.55 + 0.45 * Math.abs(Math.sin(t * 19 + Math.sin(t * 7) * 2.5)) +
+        0.12 * Math.sin(t * 53);
+      lightRef.current.intensity = lightBase * Math.max(0.3, f);
+    }
+    if (groundLightRef.current) {
+      const f =
+        0.5 + 0.5 * Math.abs(Math.sin(t * 14 + 1.7 + Math.sin(t * 5) * 2.5)) +
+        0.1 * Math.sin(t * 41);
+      groundLightRef.current.intensity = lightBase * 0.75 * Math.max(0.3, f);
+    }
+  });
+
+  if (!built) return null;
+  return (
+    <>
+      <primitive object={built.flames} />
+      {built.ground && <primitive object={built.ground} />}
+      {built.smoke && <primitive object={built.smoke} />}
+      {/* canopy glow — lower decay so it actually reaches the whole tree */}
+      <pointLight
+        ref={lightRef}
+        color="#ff5a1c"
+        intensity={lightBase}
+        distance={Math.max(45, bounds.radius * 12)}
+        decay={1.5}
+        position={[0, bounds.height * (tier === 1 ? 0.6 : 0.42), 0]}
+      />
+      {/* dedicated trunk + ground light, low down */}
+      <pointLight
+        ref={groundLightRef}
+        color="#ff6a26"
+        intensity={lightBase * 0.75}
+        distance={Math.max(26, bounds.radius * 6)}
+        decay={1.5}
+        position={[0, bounds.height * 0.06 + 1, 0]}
+      />
+    </>
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -901,11 +1249,12 @@ function SproutForm({
       emissiveIntensity: 0.4,
       flatShading: true,
     });
+    const hr = healthRamp(skin, healthScore);
     const leafGeo = buildLeafGeometry();
     const leafMat = toonMaterial({
-      color: skinLeafColor(skin, healthScore),
+      color: hr.color,
       emissive: skin.leaf.emissive,
-      emissiveIntensity: 0.32,
+      emissiveIntensity: 0.32 * hr.emissiveScale,
     });
     attachWindShader(leafMat, 0, leafS, 0.9, volatilityToWind(volatility) * 0.1);
     // 3 distinct oversized leaves fanning up-and-out from the stem tip
@@ -988,20 +1337,30 @@ function SproutForm({
 /* the ez-tree instance                                                */
 /* ------------------------------------------------------------------ */
 
+const _bark = new THREE.Color(BARK_COLOR);
+const _barkEm = new THREE.Color("#2a1a4a");
+const _charcoal = new THREE.Color("#08060a"); // near-black — bark under flame
+const _black = new THREE.Color("#000000");
+
 function EzTreeObject({
   ticker,
   structureStage,
   healthScore,
   volatility,
   skin: skinId,
-  shedding,
+  fireTier,
+  fireSpeed = DEFAULT_FIRE_SPEED,
   onBounds,
 }: Omit<Tree3DSceneProps, "interactive"> & {
+  fireTier: number;
   onBounds: (b: TreeBounds) => void;
 }) {
   const [tree] = useState(() => new Tree());
   const skin = getSkin(skinId);
   const breatheRef = useRef<THREE.Group>(null);
+  const branchMatRef = useRef<THREE.MeshToonMaterial | null>(null);
+  const fullBranchIdx = useRef(0);
+  const char = fireChar(fireTier);
 
   const [gen, setGen] = useState(0);
   const [localBounds, setLocalBounds] = useState<TreeBounds | null>(null);
@@ -1022,14 +1381,17 @@ function EzTreeObject({
 
     // swap ez-tree's textured phong materials for flat toon
     (tree.branchesMesh.material as THREE.Material).dispose();
-    tree.branchesMesh.material = toonMaterial({
+    const branchMat = toonMaterial({
       color: BARK_COLOR,
       emissive: "#2a1a4a",
       emissiveIntensity: 0.45,
     });
+    tree.branchesMesh.material = branchMat;
+    branchMatRef.current = branchMat;
     tree.branchesMesh.castShadow = true;
     tree.branchesMesh.receiveShadow = true;
     tree.leavesMesh.visible = false; // <SkinnedCanopy> owns the foliage now
+    fullBranchIdx.current = tree.branchesMesh.geometry.index?.count ?? 0;
 
     const box = new THREE.Box3().setFromObject(tree);
     const b: TreeBounds = {
@@ -1057,6 +1419,27 @@ function EzTreeObject({
     };
   }, [tree]);
 
+  // CONTINUOUS branch dieback — trims the tail of the branch index buffer
+  // (ez-tree fills it tip-last) so branches recede from the tips inward as
+  // health falls. Render-state only, never a regenerate.
+  useEffect(() => {
+    if (!fullBranchIdx.current) return;
+    const keep = healthToBranchKeep(healthScore);
+    tree.branchesMesh.geometry.setDrawRange(
+      0,
+      Math.max(6, Math.floor(fullBranchIdx.current * keep)),
+    );
+  }, [tree, gen, healthScore]);
+
+  // char the bark toward charcoal while the tree burns
+  useEffect(() => {
+    const m = branchMatRef.current;
+    if (!m) return;
+    m.color.copy(_bark).lerp(_charcoal, Math.min(1, char * 1.1));
+    m.emissive.copy(_barkEm).lerp(_black, char);
+    m.emissiveIntensity = 0.45 * (1 - char * 0.9);
+  }, [gen, char]);
+
   // slow breathing scale on the whole tree — ~7s cycle; plus a mount grow-in
   const grow = useMountGrow();
   useFrame((state) => {
@@ -1078,15 +1461,28 @@ function EzTreeObject({
             tree={tree}
             gen={gen}
             skin={skin}
+            structureStage={structureStage}
             healthScore={healthScore}
             volatility={volatility}
             bounds={localBounds}
+            char={char}
           />
         </SceneErrorBoundary>
       )}
-      {shedding && localBounds && (
+      {localBounds && (
         <SceneErrorBoundary>
           <FallingFoliage skin={skin} healthScore={healthScore} bounds={localBounds} />
+        </SceneErrorBoundary>
+      )}
+      {fireTier > 0 && localBounds && (
+        <SceneErrorBoundary>
+          <Fire
+            tree={tree}
+            gen={gen}
+            bounds={localBounds}
+            tier={fireTier}
+            speed={fireSpeed}
+          />
         </SceneErrorBoundary>
       )}
     </group>
@@ -1171,6 +1567,7 @@ class SceneErrorBoundary extends Component<
 /* stage 0/1 are hand-authored; the ez-tree generator only runs from stage 2. */
 function StageContent(
   props: Omit<Tree3DSceneProps, "interactive"> & {
+    fireTier: number;
     onBounds: (b: TreeBounds) => void;
   },
 ) {
@@ -1201,11 +1598,13 @@ function SceneContents({
   healthScore,
   volatility,
   skin: skinId,
-  shedding = false,
+  fireSpeed = DEFAULT_FIRE_SPEED,
   interactive = false,
 }: Tree3DSceneProps) {
   const [bounds, setBounds] = useState<TreeBounds>({ height: 28, radius: 12 });
   const d = Math.max(bounds.height, bounds.radius * 2);
+  // fire tier (0-3) — health threshold with hysteresis so it can't strobe
+  const fireTier = useFireTier(healthScore);
 
   return (
     <>
@@ -1257,7 +1656,8 @@ function SceneContents({
           healthScore={healthScore}
           volatility={volatility}
           skin={skinId}
-          shedding={shedding}
+          fireTier={fireTier}
+          fireSpeed={fireSpeed}
           onBounds={setBounds}
         />
       </SceneErrorBoundary>
@@ -1284,10 +1684,10 @@ function SceneContents({
         <EffectComposer>
           <Bloom
             mipmapBlur
-            intensity={0.9}
-            luminanceThreshold={0.62}
+            intensity={0.78}
+            luminanceThreshold={0.68}
             luminanceSmoothing={0.25}
-            radius={0.75}
+            radius={0.7}
           />
           <Vignette offset={0.3} darkness={0.6} eskil={false} />
         </EffectComposer>

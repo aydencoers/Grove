@@ -3,8 +3,22 @@
 import { useState } from "react";
 
 import { Tree3D } from "@/components/tree/tree-3d";
-import { healthLabelForUnit } from "@/lib/tree3d";
-import { SKIN_LIST, type SkinId } from "@/lib/tree-skins";
+import {
+  describeTree,
+  FIRE_HYSTERESIS,
+  FIRE_TIER_LABELS,
+  FIRE_TRIGGERS,
+  healthToBranchKeep,
+  resolveFireTier,
+} from "@/lib/tree3d";
+import {
+  getSkin,
+  healthLabelForPercent,
+  healthRamp,
+  SKIN_LIST,
+  skinSwatch,
+  type SkinId,
+} from "@/lib/tree-skins";
 import { cn } from "@/lib/utils";
 
 const STAGE_LABELS = [
@@ -66,13 +80,23 @@ function Slider({
 export default function DevTreePage() {
   const [ticker, setTicker] = useState("NVDA");
   const [structureStage, setStructureStage] = useState(3);
-  const [healthScore, setHealthScore] = useState(0.3);
-  const [volatility, setVolatility] = useState(0.35);
+  // healthScore is a blended recent-return PERCENT (SPEC §2), not a unit scale.
+  const [healthScore, setHealthScore] = useState(3);
   const [skin, setSkin] = useState<SkinId>("default");
-  const [shedding, setShedding] = useState(false);
   const [view, setView] = useState<"single" | "all">("single");
 
+  // Not surfaced as controls: volatility is bucketed geometry (rebuilds the
+  // mesh) and fire speed is fixed on the live scene. Kept as constants so the
+  // gnarliness bucket still matches what the detail view renders.
+  const volatility = 0.35;
+
   const cleanTicker = ticker.trim() || "NVDA";
+  const hr = healthRamp(getSkin(skin), healthScore);
+  const signedPct = `${healthScore > 0 ? "+" : ""}${healthScore}%`;
+  const branchKeep = healthToBranchKeep(healthScore);
+  // escalate-only view of the tier (the live scene adds hysteresis on the way
+  // back up — the "clear at" column below shows where each tier releases)
+  const fireTier = resolveFireTier(healthScore, 0);
 
   return (
     <main className="mx-auto max-w-6xl space-y-8 px-4 py-8 md:px-8 md:py-12">
@@ -85,12 +109,13 @@ export default function DevTreePage() {
         </h1>
         <p className="text-sm text-muted-foreground">
           Live 3D tree — React Three Fiber + @dgreenheck/ez-tree. Seeded from the
-          ticker. Structure and volatility rebuild the mesh; health only tints
-          the leaves. Drag to orbit.
+          ticker. Structure + volatility rebuild the mesh. Health drives colour,
+          leaf + branch count (all continuous) and fire (threshold + hysteresis),
+          none of which regenerate. Drag to orbit.
         </p>
       </header>
 
-      <div className="grid gap-8 lg:grid-cols-[300px_minmax(0,1fr)]">
+      <div className="grid gap-8 lg:grid-cols-[340px_minmax(0,1fr)]">
         <div className="space-y-7">
           <div className="space-y-2">
             <label
@@ -157,26 +182,77 @@ export default function DevTreePage() {
             step={1}
             onChange={setStructureStage}
           />
-          <Slider
-            id="healthScore"
-            label="healthScore"
-            value={healthScore}
-            display={`${healthScore.toFixed(2)} · ${healthLabelForUnit(healthScore)}`}
-            min={-1}
-            max={1}
-            step={0.05}
-            onChange={setHealthScore}
-          />
-          <Slider
-            id="volatility"
-            label="volatility"
-            value={volatility}
-            display={volatility.toFixed(2)}
-            min={0}
-            max={1}
-            step={0.05}
-            onChange={setVolatility}
-          />
+          <div className="space-y-2">
+            <Slider
+              id="healthScore"
+              label="healthScore · recent %"
+              value={healthScore}
+              display={`${signedPct} · ${healthLabelForPercent(healthScore)}`}
+              min={-85}
+              max={25}
+              step={1}
+              onChange={setHealthScore}
+            />
+            <dl className="space-y-1.5 rounded-lg border border-border bg-card px-3 py-2 font-mono text-[0.7rem]">
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <dt className="text-muted-foreground">value</dt>
+                  <dd className="text-foreground/90">{signedPct}</dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">leaves</dt>
+                  <dd className="text-foreground/90">
+                    {Math.round(hr.density * 100)}%
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">branches</dt>
+                  <dd className="text-foreground/90">
+                    {Math.round(branchKeep * 100)}%
+                  </dd>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <span
+                  aria-hidden
+                  className="size-3 shrink-0 rounded-full border border-black/10"
+                  style={{ background: hr.color }}
+                />
+                <span className="text-foreground/70">
+                  {hr.color} · droop {Math.round(hr.droop * 100)}%
+                </span>
+              </div>
+              <div className="space-y-0.5 border-t border-border/60 pt-1.5">
+                <div className="text-muted-foreground">
+                  active states (threshold + hysteresis):
+                </div>
+                {FIRE_TIER_LABELS.slice(1).map((label, i) => {
+                  const on = fireTier > i;
+                  return (
+                    <div
+                      key={i}
+                      className={on ? "text-orange-400" : "text-muted-foreground/50"}
+                    >
+                      {on ? "● " : "○ "}fire {i + 1} · {label} —{" "}
+                      {FIRE_TRIGGERS[i]}% on / clears {FIRE_TRIGGERS[i] + FIRE_HYSTERESIS}%
+                    </div>
+                  );
+                })}
+                <div className="text-muted-foreground/50">
+                  ○ ground vegetation — structure ≥ 3 (not yet built)
+                </div>
+              </div>
+            </dl>
+          </div>
+
+          <div className="space-y-1.5 rounded-lg border border-border bg-card px-3 py-2.5">
+            <div className="text-[0.7rem] font-medium uppercase tracking-[0.08em] text-muted-foreground">
+              What you&rsquo;re seeing
+            </div>
+            <p className="text-xs leading-relaxed text-foreground/80">
+              {describeTree(healthScore, structureStage, fireTier)}
+            </p>
+          </div>
 
           <div className="space-y-2">
             <span className="text-[0.7rem] font-medium uppercase tracking-[0.08em] text-muted-foreground">
@@ -198,7 +274,7 @@ export default function DevTreePage() {
                   <span
                     aria-hidden
                     className="size-3 rounded-full border border-black/10"
-                    style={{ background: s.ramp.thriving }}
+                    style={{ background: skinSwatch(s) }}
                   />
                   {s.label}
                 </button>
@@ -206,23 +282,13 @@ export default function DevTreePage() {
             </div>
           </div>
 
-          <label className="flex items-center gap-2 text-xs text-muted-foreground">
-            <input
-              type="checkbox"
-              checked={shedding}
-              onChange={(e) => setShedding(e.target.checked)}
-              style={{ accentColor: "var(--primary)" }}
-            />
-            Down day — falling-leaf particles
-          </label>
-
           <p className="text-xs leading-relaxed text-muted-foreground">
             <span className="font-medium text-foreground/80">
-              healthScore and skin never regenerate the mesh.
+              healthScore, fire and skin never regenerate the mesh.
             </span>{" "}
-            Skin swaps the leaf texture + colour ramp + density on the live
-            material; only structureStage, volatility (bucketed), and the skin&rsquo;s
-            leaf <em>size</em> call generate().
+            Health moves colour + leaf density on the live materials, branch
+            count via <code>setDrawRange</code>, and fire is a particle overlay;
+            only structureStage and bucketed volatility call generate().
           </p>
         </div>
 
@@ -235,7 +301,6 @@ export default function DevTreePage() {
               healthScore={healthScore}
               volatility={volatility}
               skin={skin}
-              shedding={shedding}
               interactive
             />
           </div>
@@ -253,7 +318,6 @@ export default function DevTreePage() {
                   healthScore={healthScore}
                   volatility={volatility}
                   skin={skin}
-                  shedding={shedding}
                 />
                 <figcaption className="bg-card px-2.5 py-1.5 text-[0.7rem] text-muted-foreground">
                   {stage} · {label}
