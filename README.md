@@ -26,7 +26,7 @@ present. A drawdown makes branches die back from the tips and the canopy yellow
 and thin; a severe one sets the tree on fire until the stock recovers past the
 level that lit it.
 
-![A single tree — NVIDIA as an elder tree, +117% total return, thriving](docs/tree.jpg)
+![A single tree — Pfizer as a young tree on fire after a deep drawdown, its canopy still holding the size of an earlier peak](docs/tree.jpg)
 
 ### Mapping, precisely
 
