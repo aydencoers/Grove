@@ -1,9 +1,12 @@
 # Grove
 
-**A portfolio you can walk through.** Every stock position is a procedurally
-generated 3D tree. The tree's *size* is the best total return the position has
-ever reached — it only grows. Its *colour, fullness, and fire* track how the
-stock has done lately.
+**Watch your portfolio grow.** A stock tracker that renders each position as a
+living 3D tree — structure reflects total return, foliage reflects recent
+performance.
+
+The tree's *size* is the best total return the position has ever reached — it
+only grows. Its *colour, fullness, and fire* track how the stock has done
+lately.
 
 🌲 **Live demo:** _add your Vercel URL here_
 
