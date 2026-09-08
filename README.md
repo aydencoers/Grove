@@ -8,7 +8,7 @@ The tree's *size* is the best total return the position has ever reached — it
 only grows. Its *colour, fullness, and fire* track how the stock has done
 lately.
 
-🌲 **Live demo:** _add your Vercel URL here_
+🌲 **Live demo:** [grove-brown.vercel.app](https://grove-brown.vercel.app)
 
 ![The forest view — a grid of position cards, each with a health-tinted canopy strip](docs/forest.jpg)
 
